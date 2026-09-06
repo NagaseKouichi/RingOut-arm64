@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RingOut aarch64 port <local>
+Date: Sun, 6 Sep 2026 +0000
+Subject: [PATCH] linux aarch64: guard x86-only fmod pin, --deck, PGO, glibc fallback
+
+Against jackpoison-prog/RingOut v1.5.2 (050eccd0).
+
+Four files, +23/-5. Does not change the runtime or Dolphin vendor.
+Apply from the repo root:
+
+  git apply --check patches/0001-linux-aarch64-port-guards.patch
+  git apply patches/0001-linux-aarch64-port-guards.patch
+
+Or:  patch -p1 < 0001-linux-aarch64-port-guards.patch
+
+---
+ DolRecomp/src/cpu/cpu.c                                 |  4 +++-
+ dist/RingOut-1.0-dist/RingOut                           |  3 ++-
+ .../module-src/deps/dolrecomp-src/cpu/cpu.c             |  4 +++-
+ dist/RingOut-1.0-dist/setup.sh                          | 17 +++++++++++++++--
+ 4 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/DolRecomp/src/cpu/cpu.c b/DolRecomp/src/cpu/cpu.c
+index b07a582c..35632dd1 100644
+--- a/DolRecomp/src/cpu/cpu.c
++++ b/DolRecomp/src/cpu/cpu.c
+@@ -37,7 +37,9 @@
+ // unnoticed because the shipped binary predates it and install(1) re-stamped its
+ // mtime, so it looked current. The pin is only ever needed for the module, which
+ // is the thing that gets dlopened on a Deck.
+-#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID)
++// GLIBC_2.2.5 is the x86_64 fmod baseline. aarch64 glibc starts at 2.17 and
++// has no fmod@GLIBC_2.2.5, so an unguarded pin fails the module link.
++#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID) && defined(__x86_64__)
+ __asm__(".symver fmod,fmod@GLIBC_2.2.5");
+ #endif
+ 
+diff --git a/dist/RingOut-1.0-dist/RingOut b/dist/RingOut-1.0-dist/RingOut
+index 979a63b8..86f2d530 100755
+--- a/dist/RingOut-1.0-dist/RingOut
++++ b/dist/RingOut-1.0-dist/RingOut
+@@ -282,7 +282,8 @@ NEED_GLIBC=2.36
+ host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
+ LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
+ 
+-if [ -n "$host_glibc" ] && [ -x "$LOADER" ] && \
++# Bundled glibc + PT_INTERP is x86_64-only. aarch64 uses the host loader.
++if [ "$(uname -m)" = "x86_64" ] && [ -n "$host_glibc" ] && [ -x "$LOADER" ] && \
+    [ "$(printf '%s\n%s\n' "$NEED_GLIBC" "$host_glibc" | sort -V | head -1)" != "$NEED_GLIBC" ]; then
+     echo "Ring Out: host glibc $host_glibc is older than $NEED_GLIBC - using bundled glibc." >&2
+     # $LIB_PATH, not $HERE/lib: on this path the bundled glibc genuinely has to
+diff --git a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
+index b07a582c..35632dd1 100644
+--- a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
++++ b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
+@@ -37,7 +37,9 @@
+ // unnoticed because the shipped binary predates it and install(1) re-stamped its
+ // mtime, so it looked current. The pin is only ever needed for the module, which
+ // is the thing that gets dlopened on a Deck.
+-#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID)
++// GLIBC_2.2.5 is the x86_64 fmod baseline. aarch64 glibc starts at 2.17 and
++// has no fmod@GLIBC_2.2.5, so an unguarded pin fails the module link.
++#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID) && defined(__x86_64__)
+ __asm__(".symver fmod,fmod@GLIBC_2.2.5");
+ #endif
+ 
+diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
+index 8c8c9064..96356b1b 100755
+--- a/dist/RingOut-1.0-dist/setup.sh
++++ b/dist/RingOut-1.0-dist/setup.sh
+@@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
+     exit 1
+ fi
+ 
++# Host ISA. --deck is an x86_64 Steam Deck compatibility mode; passing
++# -march=x86-64-v3 on aarch64 fails the compile instead of helping.
++HOST_ARCH="$(uname -m)"
+ if [ "$DECK" = 1 ]; then
+-    MARCH="x86-64-v3"
++    case "$HOST_ARCH" in
++        x86_64|amd64) MARCH="x86-64-v3" ;;
++        aarch64|arm64)
++            echo "error: --deck is for Steam Deck (x86_64). On $HOST_ARCH omit --deck." >&2
++            exit 1
++            ;;
++        *) MARCH="native" ;;
++    esac
+ else
+     MARCH="native"
+ fi
+@@ -394,7 +404,10 @@ echo "==> 3/$NSTAGES  Building the module"
+ # regions. So: use the profile for THIS disc, and if there is not one, use none.
+ PGO_ARGS=()
+ PROFILE=""
+-if "$CC" --version 2>&1 | grep -qi clang; then
++# Shipped .profdata files were trained on x86_64 modules. Feeding them to an
++# aarch64 clang is a mismatched profile (wrong CFG hashes) and is slower than
++# none. Train on this machine with --pgo instead.
++if "$CC" --version 2>&1 | grep -qi clang && { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; }; then
+     if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
+         PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
+     elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
+-- 
+2.43.0

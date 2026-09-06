@@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
     exit 1
 fi
 
+# Host ISA. --deck is an x86_64 Steam Deck compatibility mode; passing
+# -march=x86-64-v3 on aarch64 fails the compile instead of helping.
+HOST_ARCH="$(uname -m)"
 if [ "$DECK" = 1 ]; then
-    MARCH="x86-64-v3"
+    case "$HOST_ARCH" in
+        x86_64|amd64) MARCH="x86-64-v3" ;;
+        aarch64|arm64)
+            echo "error: --deck is for Steam Deck (x86_64). On $HOST_ARCH omit --deck." >&2
+            exit 1
+            ;;
+        *) MARCH="native" ;;
+    esac
 else
     MARCH="native"
 fi
@@ -569,8 +579,10 @@ echo "==> 3/$NSTAGES  Building the module"
 # clang 22 uses). The check after the build reports any mismatch that is left.
 PGO_ARGS=()
 PROFILE=""
+# Shipped .profdata files were trained for x86_64. ARM64 needs its own
+# compiler- and target-matched training, not either of these x86 profiles.
 CLANG_MAJOR="$("$CC" -dumpversion 2>/dev/null | cut -d. -f1)"
-if "$CC" --version 2>&1 | grep -qi clang; then
+if "$CC" --version 2>&1 | grep -qi clang && { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; }; then
     if [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata" ]; then
         PROFILE="$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata"
     elif [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then

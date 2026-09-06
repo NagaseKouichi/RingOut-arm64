@@ -43,7 +43,9 @@
 // unnoticed because the shipped binary predates it and install(1) re-stamped its
 // mtime, so it looked current. The pin is only ever needed for the module, which
 // is the thing that gets dlopened on a Deck.
-#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID)
+// GLIBC_2.2.5 is the x86_64 fmod baseline. aarch64 glibc starts at 2.17 and
+// has no fmod@GLIBC_2.2.5, so an unguarded pin fails the module link.
+#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID) && defined(__x86_64__)
 __asm__(".symver fmod,fmod@GLIBC_2.2.5");
 #endif
 
