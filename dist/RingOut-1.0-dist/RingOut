@@ -282,7 +282,8 @@ NEED_GLIBC=2.36
 host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
 LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
 
-if [ -n "$host_glibc" ] && [ -x "$LOADER" ] && \
+# Bundled glibc + PT_INTERP is x86_64-only. aarch64 uses the host loader.
+if [ "$(uname -m)" = "x86_64" ] && [ -n "$host_glibc" ] && [ -x "$LOADER" ] && \
    [ "$(printf '%s\n%s\n' "$NEED_GLIBC" "$host_glibc" | sort -V | head -1)" != "$NEED_GLIBC" ]; then
     echo "Ring Out: host glibc $host_glibc is older than $NEED_GLIBC - using bundled glibc." >&2
     # $LIB_PATH, not $HERE/lib: on this path the bundled glibc genuinely has to

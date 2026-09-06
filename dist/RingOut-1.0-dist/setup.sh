@@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
     exit 1
 fi
 
+# Host ISA. --deck is an x86_64 Steam Deck compatibility mode; passing
+# -march=x86-64-v3 on aarch64 fails the compile instead of helping.
+HOST_ARCH="$(uname -m)"
 if [ "$DECK" = 1 ]; then
-    MARCH="x86-64-v3"
+    case "$HOST_ARCH" in
+        x86_64|amd64) MARCH="x86-64-v3" ;;
+        aarch64|arm64)
+            echo "error: --deck is for Steam Deck (x86_64). On $HOST_ARCH omit --deck." >&2
+            exit 1
+            ;;
+        *) MARCH="native" ;;
+    esac
 else
     MARCH="native"
 fi
@@ -479,7 +489,10 @@ echo "==> 3/$NSTAGES  Building the module"
 # regions. So: use the profile for THIS disc, and if there is not one, use none.
 PGO_ARGS=()
 PROFILE=""
-if "$CC" --version 2>&1 | grep -qi clang; then
+# Shipped .profdata files were trained on x86_64 modules. Feeding them to an
+# aarch64 clang is a mismatched profile (wrong CFG hashes) and is slower than
+# none. Train on this machine with --pgo instead.
+if "$CC" --version 2>&1 | grep -qi clang && { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; }; then
     if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
         PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
     elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then

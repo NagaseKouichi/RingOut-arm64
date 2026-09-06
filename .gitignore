@@ -78,6 +78,15 @@
 /build-win/
 /build-dolrecomp-static/
 /build-dolrecomp/
+# aarch64 cross/native trees and the Debian 12 arm64 sysroot (hundreds of MB)
+/release/
+/build-arm64/
+/build-arm64-cross/
+/arm64/sysroot/
+/arm64/tmp/
+/arm64/ccache/
+/arm64/build-arm64/
+/arm64/build-arm64-cross/
 # root-level ccache/CMake cache written by those trees -- 700 MB+ and never
 # wanted. The per-project /*/.cache/ rules above do not reach the repo root.
 /.cache/
