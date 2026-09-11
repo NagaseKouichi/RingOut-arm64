@@ -754,7 +754,11 @@ WiiSocket::ConnectingState WiiSocket::GetConnectingState() const
   Common::ScopeGuard guard([&state] { Common::RestoreNetworkErrorState(state); });
 
 #ifdef _WIN32
-  constexpr int (*get_errno)() = &WSAGetLastError;
+  // const, not constexpr: WSAGetLastError is imported from ws2_32, so its
+  // address is resolved through an import thunk at load time and is not a
+  // constant expression under MinGW. MSVC accepts it; nothing here needs the
+  // value at compile time either way.
+  int (*const get_errno)() = &WSAGetLastError;
 #else
   constexpr int (*get_errno)() = []() { return errno; };
 #endif

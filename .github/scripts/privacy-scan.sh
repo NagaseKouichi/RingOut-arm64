@@ -33,10 +33,13 @@ DIR="${1:?usage: privacy-scan.sh <staged-package-dir>}"
 #
 #  - Dolphin vendors Triforce/ALL.Net defaults that are literal 192.168.x
 #    strings in the binary. Upstream data, not the builder's network.
-#  - The project's own public repo URL is deliberate.
+#  - The project's own PUBLIC repo URL is deliberate. Anchored to /RingOut
+#    rather than the whole org: the private development repo is RingOutRecomp,
+#    and an org-wide allow would wave that through as readily as the public one.
+#    \b stops it matching RingOutRecomp while still allowing /RingOut/... .
 #  - /home/deck and /home/user are generic; they name no individual and appear
 #    in SteamOS-facing docs and defaults.
-ALLOW='ALL\.Net|CyCraft|Key of Avalon|MarioKart|namcam|github\.com/jackpoison-prog|/home/deck|/home/user\b'
+ALLOW='ALL\.Net|CyCraft|Key of Avalon|MarioKart|namcam|github\.com/jackpoison-prog/RingOut\b|/home/deck|/home/user\b'
 [ -n "${PRIVACY_EXTRA_ALLOW:-}" ] && ALLOW="$ALLOW|$PRIVACY_EXTRA_ALLOW"
 
 # Where this repository is checked out, regex-escaped. BUILD_ROOT= overrides it
@@ -72,6 +75,17 @@ PATTERNS_ALWAYS=(
   'github_pat_[A-Za-z0-9_]{20,}'
   'AKIA[0-9A-Z]{16}'              # aws
   'xox[baprs]-[A-Za-z0-9-]{10,}'  # slack
+  # The PRIVATE development repo. Not a personal identifier, but it must never
+  # reach a published package, and it did: every Deck zip up to and including
+  # 1.5.2 gave this as the GPL written offer in CREDITS.txt, pointing the one
+  # URL a Deck owner needs to exercise their source rights at a 404. Every one
+  # of those releases passed this scan, because nothing here was looking for it.
+  #
+  # In PATTERNS_ALWAYS, not PATTERNS_TEXT: this is a fixed literal that cannot
+  # collide with upstream binary data, so it is worth checking the binaries for
+  # too. (This said PATTERNS_TEXT was dead code, which it was when written --
+  # declared and never read. It is wired in now, below.)
+  'jackpoison-prog/RingOutRecomp'
 )
 # TEXT ONLY: in a config file a private address is the user's own network and a
 # PEM header is a real key. In the runtime binary both are upstream Dolphin
@@ -133,8 +147,66 @@ while IFS= read -r f; do
     */game/*) continue ;;
   esac
 
+  # A .tar.gz is opaque to `strings`, and the GPL source shipment is nothing
+  # BUT tarballs -- so the one directory whose contents most need checking was
+  # the one directory the scan could not read. It shipped a committed .pyc
+  # carrying an upstream author's macOS home path in every desktop package;
+  # found 2026-09-11 by scanning the git tree instead, which is not something a
+  # release should depend on remembering to do.
+  #
+  # Streamed through `strings` into grep rather than captured in a variable:
+  # these archives are ~20 MB compressed and far larger open, and command
+  # substitution would both hold all of that in memory and warn on every null
+  # byte in what is mostly binary content.
+  case "$f" in
+    *.tar.gz|*.tgz|*.tar)
+      # PATTERNS_ALWAYS only, NOT the text set. These archives are vendored
+      # upstream source, which is the same category as the runtime binary: a
+      # private address in Dolphin's own tree is its Triforce LAN default and an
+      # email is a copyright line, not the builder's data. Running the text
+      # patterns here reported ~40 such hits across two tarballs and buried the
+      # one line that mattered.
+      #
+      # It is still the right net: the fault this was written for was a
+      # committed .pyc holding an upstream author's macOS home path, and home
+      # paths are in PATTERNS_ALWAYS precisely because they identify a person
+      # wherever they appear. (Not quoted here -- writing the literal into this
+      # file would publish the very string the scan exists to keep out, and this
+      # script is public.)
+      for p in "${PATTERNS_ALWAYS[@]}" ${BUILD_ROOT_RE:+"$BUILD_ROOT_RE"}; do
+        # Same third-party skips the file loop applies, for the same reason:
+        # the vendored Externals are stock upstream sources and carry their
+        # authors' emails, Dolphin's Triforce LAN defaults and mbedtls PEM
+        # templates. Reporting those buries the one line that matters.
+        m="$({ tar xz --exclude='*/Externals/*' --exclude='*/Data/*' -Of "$f" 2>/dev/null ||
+               tar x --exclude='*/Externals/*' --exclude='*/Data/*' -Of "$f" 2>/dev/null; } |
+             strings -a | grep -aE "$p" | grep -avE "$ALLOW" |
+             grep -aEo "$p" | sort -u | head -3)"
+        if [ -n "$m" ]; then
+          echo "  FAIL: $(realpath --relative-to="$DIR" "$f" 2>/dev/null || echo "$f") (inside the archive)"
+          echo "$m" | sed 's/^/    /'
+          hits=1
+        fi
+      done
+      continue
+      ;;
+  esac
+
   pats=("${PATTERNS_ALWAYS[@]}")
   [ -n "$BUILD_ROOT_RE" ] && pats+=("$BUILD_ROOT_RE")
+  # The text-only set, which the comment above PATTERNS_TEXT describes and
+  # which nothing added to this list until 2026-09-10. Every release up to and
+  # including 1.5.2 was scanned with HALF its patterns: no email address, no
+  # private LAN address, no ssh key and no PEM private-key header was looked
+  # for, in any file. The array was written, documented and then never read.
+  #
+  # -I is what makes the distinction the comment asks for: grep treats a binary
+  # file as non-matching, so this asks "does the file contain text at all" and
+  # is false for the runtime binary, where these same patterns are upstream
+  # Dolphin data rather than the builder's.
+  if LC_ALL=C grep -qI . "$f" 2>/dev/null; then
+    pats+=("${PATTERNS_TEXT[@]}")
+  fi
 
   for p in "${pats[@]}"; do
     m="$(strings -a "$f" 2>/dev/null | grep -aE "$p" | grep -avE "$ALLOW" |

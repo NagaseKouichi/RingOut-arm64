@@ -31,8 +31,13 @@
 #define fseeko _fseeki64
 #define ftello _ftelli64
 #define atoll _atoi64
+#ifdef _MSC_VER
+// MinGW's <sys/stat.h> declares struct _stat64 itself, so this macro rewrites
+// that declaration into a redefinition of the type it is declaring. MinGW also
+// does not need the alias: it provides stat/fstat directly.
 #define stat _stat64
 #define fstat _fstat64
+#endif
 #define fileno _fileno
 
 extern "C" {

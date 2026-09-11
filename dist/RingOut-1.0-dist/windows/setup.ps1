@@ -223,6 +223,40 @@ $dll = Join-Path $Work "build\g${DiscId}_recomp.dll"
 if (-not (Test-Path -LiteralPath $dll)) { Die "Module built but g${DiscId}_recomp.dll was not produced." }
 Copy-Item $dll (Join-Path $Here 'bin') -Force
 
+# The game's own artwork, taken from the disc you supplied -- the same step
+# setup.sh runs on Linux, and the same rule: NONE of it ships in this package.
+# It belongs to the publisher, so it is extracted here on your machine exactly
+# as the module above is. gc-art.py is standard library only, so the bundled
+# Python runs it with nothing installed.
+#
+# art\icon.ico is what the shortcuts point at, preferring the memory-card icon
+# and falling back to the disc banner. The card icon only exists once you have
+# saved, so this is worth re-running after you have played -- the shortcut then
+# picks up the real icon.
+Write-Host "==> artwork"
+$gcArt = Join-Path $Here 'tools\gc-art.py'
+if ((Test-Path -LiteralPath $gcArt) -and (Test-Path -LiteralPath $Python)) {
+    & $Python $gcArt $Here
+    $ico = Join-Path $Here 'art\icon.ico'
+    if (Test-Path -LiteralPath $ico) {
+        # Repoint the shortcuts the installer made. They were created before a
+        # disc existed, so they could not have had the game's icon until now.
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($lnk in @(
+            (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ring Out.lnk'),
+            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Ring Out\Ring Out.lnk'))) {
+            if (Test-Path -LiteralPath $lnk) {
+                $sc = $shell.CreateShortcut($lnk)
+                $sc.IconLocation = $ico
+                $sc.Save()
+                Write-Host "    icon set on $(Split-Path $lnk -Leaf)"
+            }
+        }
+    }
+} else {
+    Write-Host "    skipped (no gc-art.py or python)"
+}
+
 # Bundled post-processing filters (scanlines, CRT). Dolphin only searches
 # <userdir>\Shaders, so they are installed there. Existing files are left
 # alone so an edited filter is never overwritten.

@@ -255,6 +255,8 @@ void PlatformX11::ProcessEvents()
           RecompMenu::OnKey(RecompMenu::Key::Right);
         else if (key == XK_space || key == XK_Return || key == XK_KP_Enter)
           RecompMenu::OnKey(RecompMenu::Key::Activate);
+        else if (key == XK_Delete || key == XK_KP_Delete)
+          RecompMenu::OnKey(RecompMenu::Key::Delete);
         break;
       }
       if (key == XK_F10)

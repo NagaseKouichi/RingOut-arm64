@@ -68,6 +68,12 @@ struct RuntimeConfig
   bool allow_interpreter = false;
   bool show_fps_in_title = true;
   std::optional<std::string> window_title;
+  // Match replays. Recording writes a .dtm of every pad poll and saves it when
+  // the session ends; replaying feeds one back instead of the pads. Both are
+  // set up before boot, because a .dtm is a recording of the whole session from
+  // power-on -- there is no savestate anchor here.
+  std::filesystem::path record_movie;
+  std::filesystem::path replay_movie;
 };
 
 enum class RuntimeErrorCode

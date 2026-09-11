@@ -11,7 +11,10 @@
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
 
-#ifdef _MSC_VER
+// _WIN32, not _MSC_VER: the CompareStringOrdinal call below is guarded by
+// _WIN32, so a MinGW build compiles the call while skipping the header that
+// declares it, TRUE and CSTR_EQUAL.
+#ifdef _WIN32
 #include <Windows.h>
 #elifdef ANDROID
 #include "jni/AndroidCommon/AndroidCommon.h"

@@ -137,6 +137,14 @@ static XInputGetBatteryInformation_t PXInputGetBatteryInformation = nullptr;
 
 static bool s_have_guide_button = false;
 
+#ifndef XINPUT_DLL
+// MinGW's <xinput.h> carries the structs and constants but not the SDK's
+// XINPUT_DLL macro naming the library. The SDK defines it as xinput1_4.dll for
+// _WIN32_WINNT >= Win8, which is what this builds against, and the xinput1_3
+// fallback below is unaffected either way.
+#define XINPUT_DLL TEXT("xinput1_4.dll")
+#endif
+
 void Init()
 {
   if (!hXInput)

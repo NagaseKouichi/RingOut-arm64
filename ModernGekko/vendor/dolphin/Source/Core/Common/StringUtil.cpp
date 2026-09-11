@@ -820,7 +820,13 @@ std::u16string UTF8ToUTF16(std::string_view input)
 // This is a replacement for path::u8path, which is deprecated starting with C++20.
 std::filesystem::path StringToPath(std::string_view path)
 {
-#ifdef _MSC_VER
+// _WIN32, not _MSC_VER. On MinGW this took the narrow branch, which still
+// COMPILES -- and that is the danger. std::filesystem::path built from a
+// narrow string on Windows decodes it with the active ANSI codepage, not
+// UTF-8, so every non-ASCII path silently became a different path. Only the
+// PathToString twin below failed loudly, because there the wide native()
+// cannot convert to std::string.
+#ifdef _WIN32
   return std::filesystem::path(UTF8ToWString(path));
 #else
   return std::filesystem::path(path);
@@ -831,7 +837,7 @@ std::filesystem::path StringToPath(std::string_view path)
 // path::u8string returns std::u8string starting with C++20, which is annoying to convert.
 std::string PathToString(const std::filesystem::path& path)
 {
-#ifdef _MSC_VER
+#ifdef _WIN32
   return WStringToUTF8(path.native());
 #else
   return path.native();

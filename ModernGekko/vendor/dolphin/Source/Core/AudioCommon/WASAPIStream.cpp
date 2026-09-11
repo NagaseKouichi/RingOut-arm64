@@ -3,7 +3,16 @@
 
 #include "AudioCommon/WASAPIStream.h"
 
-#ifdef _WIN32
+// Dolphin's own WASAPI backend is MSVC-only in practice: it pulls in wil/, the
+// Windows Implementation Library, which does not survive a MinGW/libc++ build
+// (it breaks inside libc++'s own <atomic> internals). Excluded on MinGW.
+//
+// Nothing needs a stub. SoundStream declares `static bool IsValid() { return
+// false; }`, so WASAPIStream::IsValid() resolves to the inherited base and the
+// backend simply never offers itself -- the same path every non-Windows build
+// already takes. Audio still works: cubeb is enabled here, and cubeb's own
+// Windows backend is WASAPI.
+#if defined(_WIN32) && !defined(__MINGW32__)
 
 // clang-format off
 #include <initguid.h>

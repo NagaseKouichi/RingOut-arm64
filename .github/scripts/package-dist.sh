@@ -141,8 +141,7 @@ fi
 # canonical location rather than the working package's own
 # userdata/GameSettings, which is empty -- sourcing it from there would silently
 # ship nothing and leave the release without a CHEATS tab.
-# (The retired Windows packager resolved the same file the same way; see
-# attic/windows/.)
+# (package-windows.ps1 resolves the same file the same way.)
 #
 # Nothing ELSE from userdata/ goes: the rest is the developer's Dolphin config,
 # cache, logs and memory card, and config.ini there names a LAN address.

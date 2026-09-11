@@ -319,6 +319,80 @@ int main() {
     }
   }
 
+  // "Keyboard" is the placeholder the netplay path pushes when no gamepad is
+  // plugged in, so a keyboard player is not turned away from a session. It is
+  // not a device name, and it used to be written into GCPadNew.ini as one.
+  // Dolphin resolves a binding against a device that does not exist to nothing
+  // at all: the pad reads centred and unpressed and nothing reports an error.
+  // Found in a netplay session where the remote player moved and the local one
+  // could not -- in-game pad 2 was attached and mapped, to no device.
+  const fs::path placeholder_dir = directory / "placeholder";
+  const std::string placeholder = "Keyboard";
+  if (!moderngekko::frontend::EnsureControllerConfig(placeholder_dir,
+                                                     placeholder, &error))
+    return 36;
+  {
+    std::ifstream input(placeholder_dir / "Config" / "GCPadNew.ini");
+    const std::string config{std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>()};
+    // Never the placeholder as a device, and a real profile all the same: the
+    // fallback has to leave the player something that works.
+    if (config.contains("Device = Keyboard\n") ||
+        !config.contains("[GCPad1]"))
+      return 37;
+  }
+  // The Wiimote profile feeds ReadConfiguredControllers, which hands its Device
+  // lines to the next launch as "the controller the player selected". Writing
+  // the placeholder there is what made the fault reproduce itself forever.
+  if (moderngekko::frontend::ReadConfiguredController(placeholder_dir) ==
+      "Keyboard")
+    return 38;
+
+  // An install that already has the bad profile must recover, because the rule
+  // that an existing profile is never rewritten would otherwise keep it for
+  // good. A device name that is not SOURCE/ID/NAME is this fault's output,
+  // never a player's edit and never Dolphin's own write.
+  const fs::path repair_dir = directory / "repair";
+  fs::create_directories(repair_dir / "Config");
+  {
+    std::ofstream output(repair_dir / "Config" / "GCPadNew.ini",
+                         std::ios::trunc);
+    output << "[GCPad1]\nDevice = Keyboard\nButtons/A = `Button S`\n";
+  }
+  if (!moderngekko::frontend::EnsureControllerConfig(repair_dir, placeholder,
+                                                     &error))
+    return 39;
+  {
+    std::ifstream input(repair_dir / "Config" / "GCPadNew.ini");
+    const std::string config{std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>()};
+    if (config.contains("Device = Keyboard\n"))
+      return 40;
+  }
+
+  // ...and a profile that names a REAL device is still left alone, which is the
+  // rule the repair above has to not weaken.
+  const fs::path intact_dir = directory / "intact";
+  fs::create_directories(intact_dir / "Config");
+  const std::string intact =
+      "[GCPad1]\nDevice = SDL/3/Player Edited Pad\nButtons/A = `Button E`\n";
+  {
+    std::ofstream output(intact_dir / "Config" / "GCPadNew.ini",
+                         std::ios::trunc);
+    output << intact;
+  }
+  if (!moderngekko::frontend::EnsureControllerConfig(
+          intact_dir, std::span<const std::string>{}, &error,
+          moderngekko::frontend::LocalMultiplayer::Disabled))
+    return 41;
+  {
+    std::ifstream input(intact_dir / "Config" / "GCPadNew.ini");
+    const std::string config{std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>()};
+    if (config != intact)
+      return 42;
+  }
+
   fs::remove_all(directory);
   return 0;
 }

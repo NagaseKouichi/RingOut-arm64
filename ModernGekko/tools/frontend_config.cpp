@@ -292,10 +292,20 @@ bool GCPadConfigExists(const fs::path &user_directory) {
 
 bool WriteKeyboardGCPadConfig(const fs::path &user_directory,
                               KeyboardLayout layout, std::string *message) {
+  // The keyboard device and its key NAMES are both platform-specific, and
+  // getting either wrong fails silently: Dolphin resolves an absent device or
+  // an unknown key to nothing, every control reads unpressed, and no error is
+  // logged. That is exactly how this was found on Windows -- the profile below
+  // was written with X11 names, so a player had to rebind every key by hand.
+#ifdef _WIN32
+  // DInput's keyboard/mouse, as enumerated on a real Windows 10 machine.
+  constexpr const char *kDevice = "DInput/0/Keyboard Mouse";
+#else
   // Dolphin's Linux keyboard/mouse device is the X master pointer/keyboard
   // pair, exposed by the XInput2 backend under the pointer's name. The game
   // runs under XWayland here, so this works on a Wayland session too.
   constexpr const char *kDevice = "XInput2/0/Virtual core pointer";
+#endif
 
   // Two disjoint layouts, so one keyboard can drive two local instances --
   // which is exactly what a two-peer netplay session on one machine needs, and
@@ -305,11 +315,23 @@ bool WriteKeyboardGCPadConfig(const fs::path &user_directory,
     const char *up, *down, *left, *right;
     const char *a, *b, *x, *y, *z, *l, *r, *start;
   };
+  // Letters are spelled the same on both backends; the arrows, Return and comma
+  // are not. DInput names come from InputCommon/ControllerInterface/DInput/
+  // NamedKeys.h -- UP/DOWN/LEFT/RIGHT/RETURN/COMMA, uppercase -- against X11's
+  // Up/Down/Left/Right/Return/comma.
+#ifdef _WIN32
+  const Keys keys = (layout == KeyboardLayout::Player1)
+                        ? Keys{"UP", "DOWN", "LEFT", "RIGHT", "Z", "X",
+                               "C", "V", "F", "A", "S", "RETURN"}
+                        : Keys{"I", "K", "J", "L", "B", "N",
+                               "M", "COMMA", "H", "G", "T", "Y"};
+#else
   const Keys keys = (layout == KeyboardLayout::Player1)
                         ? Keys{"Up", "Down", "Left", "Right", "Z", "X",
                                "C", "V", "F", "A", "S", "Return"}
                         : Keys{"I", "K", "J", "L", "B", "N",
                                "M", "comma", "H", "G", "T", "Y"};
+#endif
 
   const fs::path destination = user_directory / "Config" / "GCPadNew.ini";
   std::error_code ec;
@@ -485,6 +507,39 @@ bool HasGCPad2Section(const fs::path &user_directory) {
 // SDL listed", which on the Steam Deck in Game Mode was the pad port 1 already
 // held. Mapping port 2 onto port 1's device gives both players one pad, which
 // is worse than leaving port 2 alone -- neither of them can then play.
+// Dolphin names every input device "SOURCE/ID/NAME" -- "SDL/0/Xbox One S
+// Controller", "XInput2/0/Virtual core pointer". A binding whose Device line is
+// not of that shape names a device that cannot exist, and Dolphin resolves it
+// to nothing at all: the pad reads centred and unpressed forever and NOTHING
+// reports an error.
+//
+// This exists because a bare "Keyboard" reached here and was written out as a
+// device name. It is not one -- it is the placeholder the netplay path pushes
+// when no gamepad is plugged in, so a keyboard player is not turned away from a
+// session (moderngekko_run.cpp). It was then persisted to config.ini AND to
+// WiimoteNew.ini, read back as a selected controller on the next launch, and
+// written into GCPadNew.ini as `Device = Keyboard` with a full set of SDL
+// gamepad bindings. Found 2026-09-09 in a netplay session where the remote
+// player moved and the local one could not: in-game pad 2 was attached and
+// mapped, to a device that did not exist.
+//
+// Validate the shape rather than blacklisting that one word: any string that
+// is not SOURCE/ID/NAME is equally unbindable, and this way the check does not
+// have to know which non-devices exist.
+bool IsDolphinDeviceName(std::string_view device) {
+  const std::size_t source_end = device.find('/');
+  if (source_end == 0 || source_end == std::string_view::npos)
+    return false;
+  const std::size_t id_end = device.find('/', source_end + 1);
+  if (id_end == std::string_view::npos || id_end == source_end + 1)
+    return false;
+  const std::string_view id =
+      device.substr(source_end + 1, id_end - source_end - 1);
+  if (!std::ranges::all_of(id, [](unsigned char c) { return std::isdigit(c); }))
+    return false;
+  return id_end + 1 < device.size();
+}
+
 std::string ReadGCPad1Device(const fs::path &user_directory) {
   std::ifstream input(user_directory / "Config" / "GCPadNew.ini");
   std::string line;
@@ -515,9 +570,10 @@ bool WriteGamepadGCPadConfig(const fs::path &user_directory,
     return false;
   }
   for (const std::string &device : devices) {
-    if (device.empty() || device.find_first_of("\r\n") != std::string::npos) {
+    if (device.empty() || device.find_first_of("\r\n") != std::string::npos ||
+        !IsDolphinDeviceName(device)) {
       if (message)
-        *message = "invalid gamepad device name";
+        *message = "not a gamepad device name: \"" + device + "\"";
       return false;
     }
   }
@@ -571,7 +627,12 @@ bool GenerateControllerConfig(const fs::path &user_directory,
   }
   for (const std::string &controller : controllers) {
     if (controller.empty() ||
-        controller.find_first_of("\r\n") != std::string_view::npos) {
+        controller.find_first_of("\r\n") != std::string_view::npos ||
+        !IsDolphinDeviceName(controller)) {
+      // Refusing here is what breaks the loop. This file is what
+      // ReadConfiguredControllers reads back as "the selected controller", so a
+      // non-device written once is handed to every later launch as if a player
+      // had chosen it.
       if (message)
         *message = "select connected SDL gamepads";
       return false;
@@ -683,7 +744,31 @@ bool EnsureControllerConfig(const fs::path &user_directory,
   // every time, a desktop never, because with no pad detected the span was
   // left pointing at the caller's own storage.
   std::vector<std::string> detected;
-  if (!GCPadConfigExists(user_directory)) {
+  // Drop anything that is not a device name before it is treated as a selected
+  // pad. Same lifetime rule as `detected` below: `controllers` is a span and is
+  // repointed at this, so it has to outlive the block.
+  //
+  // Filtering here rather than only in the writers is what makes a machine with
+  // a real pad recover. A list holding just the "Keyboard" placeholder is not
+  // empty, so hardware detection was skipped and the pad was never looked for;
+  // emptied, the block below asks SDL and maps what is actually plugged in.
+  std::vector<std::string> selected;
+  if (!controllers.empty()) {
+    for (const std::string &controller : controllers) {
+      if (IsDolphinDeviceName(controller))
+        selected.push_back(controller);
+    }
+    if (selected.size() != controllers.size())
+      controllers = selected;
+  }
+  // A profile naming something that is not a device is this bug's output, never
+  // a player's edit and never Dolphin's own write -- both of those name a real
+  // device. Regenerating that one case repairs an install that already has it
+  // without weakening the rule that an existing profile is left alone.
+  const std::string existing_port1 = ReadGCPad1Device(user_directory);
+  const bool profile_is_unbindable =
+      !existing_port1.empty() && !IsDolphinDeviceName(existing_port1);
+  if (!GCPadConfigExists(user_directory) || profile_is_unbindable) {
     // An explicitly selected pad wins; otherwise ask the hardware.
     bool from_hardware = false;
     if (controllers.empty()) {

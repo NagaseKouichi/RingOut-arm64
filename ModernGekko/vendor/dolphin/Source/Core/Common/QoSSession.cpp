@@ -66,7 +66,10 @@ QoSSession::QoSSession(ENetPeer* peer, int tos_val)
   setsockopt(peer->host->socket, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority));
 #endif
 
-  m_success = setsockopt(peer->host->socket, IPPROTO_IP, IP_TOS, &tos_val, sizeof(tos_val)) == 0;
+  // Winsock's setsockopt takes const char* where POSIX takes const void*. A
+  // const char* converts implicitly to const void*, so one cast serves both.
+  m_success = setsockopt(peer->host->socket, IPPROTO_IP, IP_TOS,
+                         reinterpret_cast<const char*>(&tos_val), sizeof(tos_val)) == 0;
 }
 
 QoSSession::~QoSSession() = default;

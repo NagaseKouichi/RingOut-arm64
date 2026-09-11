@@ -43,7 +43,41 @@ const std::string& GetScmRevStr()
 
 const std::string& GetScmRevGitStr()
 {
+  // THE NETPLAY HANDSHAKE AND THE .DTM REVISION BOTH KEY OFF THIS STRING, and
+  // both compare it byte for byte -- so it has to identify the RELEASE, not the
+  // machine that compiled it.
+  //
+  // Upstream sets SCM_REV_STR from `git rev-parse HEAD` in the source tree.
+  // Here that is unstable across build environments, not merely across commits:
+  //
+  //   * on this workstation, ModernGekko/ is a NESTED git repo whose .git is
+  //     not tracked by the outer one, so git answers with the vendored Dolphin
+  //     commit -- 1873066167f3..., fixed forever;
+  //   * on a CI runner the nested .git does not exist in a fresh clone, git
+  //     walks up to the outer repo, and the answer is the RingOut commit --
+  //     different on every push.
+  //
+  // The Linux and Deck packages are built here; the Windows package is built on
+  // CI. Two builds of THE SAME RELEASE therefore disagreed, and a Linux player
+  // and a Windows player on identical versions were refused at connect with
+  // "The server and client's NetPlay versions are incompatible." Measured, not
+  // theorised: that is exactly how a desktop-to-laptop session failed.
+  //
+  // Keyed on VERSION instead. Every build of 1.5.2 now shakes hands as 1.5.2 --
+  // wherever it was compiled, and by whom -- which makes "both use the same
+  // release" true advice rather than a hope. It also stops a rebuild silently
+  // breaking compatibility with binaries already in players' hands.
+  //
+  // What this does NOT weaken: two different builds of one version can now
+  // connect, but the CompatibilityFingerprint in netplay_compatibility.cpp
+  // still compares the disc hash, the module's chunk hashes, the ABI versions
+  // and sizeof(CPUState) -- the things that actually have to agree for the
+  // emulated state to stay identical.
+#ifdef MODERNGEKKO_PROJECT_VERSION
+  static const std::string scm_rev_git_str = "RingOut " MODERNGEKKO_PROJECT_VERSION;
+#else
   static const std::string scm_rev_git_str = SCM_REV_STR;
+#endif
   return scm_rev_git_str;
 }
 

@@ -10,7 +10,13 @@
 ; Programs folder, which is writable.
 
 #define AppName    "Ring Out"
-#define AppVersion "1.0"
+; Overridden by package-windows.ps1 with /DAppVersion=<VERSION>. The value
+; here is only a fallback for compiling this script by hand -- the packaged
+; installer takes its version from the repo's VERSION file, so the filename
+; and the Add/Remove Programs entry cannot disagree with what was built.
+#ifndef AppVersion
+  #define AppVersion "0.0-handbuilt"
+#endif
 #define AppPublisher "Jack Poison"
 
 [Setup]
@@ -51,7 +57,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-Source: "RingOut-1.0\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; StageDir comes from package-windows.ps1 (/DStageDir), for the same reason
+; AppVersion does: the staging directory is named from VERSION, so a literal
+; "RingOut-1.0" here silently stops matching the moment the version moves.
+; That is exactly what happened -- ISCC failed with "No files found matching
+; ...\RingOut-1.0\*" after the stage became RingOut-1.5.2.
+#ifndef StageDir
+  #define StageDir "RingOut-" + AppVersion
+#endif
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}";           Filename: "{app}\RingOut.exe"; WorkingDir: "{app}"

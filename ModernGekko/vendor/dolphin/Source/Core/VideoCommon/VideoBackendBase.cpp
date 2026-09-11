@@ -26,7 +26,7 @@
 #include "Core/System.h"
 
 // TODO: ugly
-#ifdef _WIN32
+#ifdef HAS_D3D
 #include "VideoBackends/D3D/VideoBackend.h"
 #include "VideoBackends/D3D12/VideoBackend.h"
 #endif
@@ -71,6 +71,9 @@
 
 VideoBackendBase* g_video_backend = nullptr;
 
+// _WIN32, not HAS_D3D: this is the hybrid-graphics hint that makes a laptop
+// run us on the discrete GPU, and it has nothing to do with which video
+// backend is compiled in. It must stay on every Windows build.
 #ifdef _WIN32
 #include <windows.h>
 
@@ -204,7 +207,7 @@ const std::vector<std::unique_ptr<VideoBackendBase>>& VideoBackendBase::GetAvail
   static auto s_available_backends = [] {
     std::vector<std::unique_ptr<VideoBackendBase>> backends;
 
-#ifdef _WIN32
+#ifdef HAS_D3D
     backends.push_back(std::make_unique<DX11::VideoBackend>());
     backends.push_back(std::make_unique<DX12::VideoBackend>());
 #endif

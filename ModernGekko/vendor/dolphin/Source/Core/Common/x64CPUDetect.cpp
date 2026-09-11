@@ -6,6 +6,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <processthreadsapi.h>
+// __cpuidex, _xgetbv and _XCR_XFEATURE_ENABLED_MASK, used by the _WIN32 branch
+// below. MSVC gets these through its precompiled header, which a MinGW build
+// does not use, so include the header that actually declares them. Both
+// toolchains provide <intrin.h>.
+#include <intrin.h>
 #endif
 
 #include <algorithm>
@@ -56,12 +61,33 @@ static u64 xgetbv(u32 index)
 
 #else
 
+// _xgetbv and _XCR_XFEATURE_ENABLED_MASK live in clang's <xsaveintrin.h>, which
+// <intrin.h> pulls in only when __XSAVE__ is defined -- that is, under -mxsave.
+// This target is baseline SSE2 deliberately, and raising the ISA baseline just
+// to read one control register would let the compiler emit XSAVE instructions
+// anywhere in the binary, on CPUs that may not have them. So MinGW issues the
+// instruction directly, exactly as the non-Windows branch above does.
+//
+// The name _xgetbv cannot be reused for the shim: clang predefines it as an
+// alias for __builtin_ia32_xgetbv even when <xsaveintrin.h> is not included,
+// so defining a function by that name is a redefinition of a builtin.
+#ifdef __MINGW32__
+constexpr u32 XCR_XFEATURE_ENABLED_MASK = 0;
+
+static u64 xgetbv(u32 index)
+{
+  u32 eax, edx;
+  __asm__ __volatile__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(index));
+  return ((u64)edx << 32) | eax;
+}
+#else
 constexpr u32 XCR_XFEATURE_ENABLED_MASK = _XCR_XFEATURE_ENABLED_MASK;
 
 static u64 xgetbv(u32 index)
 {
   return _xgetbv(index);
 }
+#endif
 
 static void WarnIfRunningUnderEmulation()
 {

@@ -20,7 +20,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x slower with a progress bar
 
-$stage = Join-Path $OutDir 'RingOut-1.0'
+# From the VERSION file, exactly as package-dist.sh and package-deck.sh do.
+# Hardcoding this shipped 1.0 in the stage directory, the zip and the installer
+# name no matter what was actually built -- the same class of bug as the "Ver
+# 1.0" title bar that survived every release up to 1.5.1.
+$Version = (Get-Content (Join-Path $RepoRoot 'VERSION') -Raw).Trim()
+if (-not $Version) { Write-Error "VERSION is empty or missing"; exit 1 }
+Write-Host "==> packaging version $Version"
+
+$stage = Join-Path $OutDir "RingOut-$Version"
 $dl    = Join-Path $OutDir '_dl'
 New-Item -ItemType Directory -Force -Path $stage, $dl | Out-Null
 
@@ -46,6 +54,9 @@ Write-Host "==> binaries"
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'bin'), (Join-Path $stage 'tools') | Out-Null
 Copy-Item (Join-Path $BinDir 'moderngekko-run.exe') (Join-Path $stage 'bin') -Force
 Copy-Item (Join-Path $BinDir 'dolrecomp.exe')       (Join-Path $stage 'tools') -Force
+# The artwork extractor, as the Linux package ships it. Standard library only,
+# so the bundled embeddable Python runs it with nothing added.
+Copy-Item (Join-Path $RepoRoot 'dist\shared\gc-art.py') (Join-Path $stage 'tools') -Force
 
 # The runtime imports MSVCP140 / VCRUNTIME140; shipping the redist DLLs beats
 # telling players to go and install the C++ redistributable first.
@@ -90,6 +101,20 @@ foreach ($f in 'README.txt', 'CREDITS.txt') {
 foreach ($f in 'setup.ps1', 'RingOut.ps1', 'RingOut.cmd') {
     Copy-Item (Join-Path $src 'windows' | Join-Path -ChildPath $f) $stage -Force
 }
+
+# ffmpeg is bundled on Windows only -- see windows\CREDITS-ffmpeg.txt for why,
+# which licence build to use, and the source offer LGPL requires. Appended
+# rather than kept in the shared CREDITS.txt, because the Linux and Deck
+# packages do not ship ffmpeg and must not claim to.
+#
+# NOT YET WIRED: nothing here downloads ffmpeg.exe into $stage. Verified by
+# hand on the test laptop (2026-09-08) that dropping the BtbN win64-lgpl static
+# build beside the launcher makes the movies play -- the runtime invokes a bare
+# "ffmpeg", and Windows searches the working directory, which RingOut.cmd sets.
+# Wire the download in alongside the llvm-mingw fetch below when this script is
+# next actually run. Roughly 132 MB, so it more than doubles the package.
+Add-Content -Path (Join-Path $stage 'CREDITS.txt') `
+            -Value (Get-Content (Join-Path $src 'windows\CREDITS-ffmpeg.txt') -Raw)
 Copy-Item (Join-Path $src 'module-src') $stage -Recurse -Force
 Copy-Item (Join-Path $src 'shaders')    $stage -Recurse -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'userdata\GameSettings') | Out-Null
@@ -107,6 +132,31 @@ Expand-Archive $llvmZip -DestinationPath $dl -Force
 $llvmRoot = Get-ChildItem $dl -Directory -Filter 'llvm-mingw-*' | Select-Object -First 1
 if (-not $llvmRoot) { throw "llvm-mingw did not extract as expected" }
 Copy-Item (Join-Path $llvmRoot.FullName '*') $tc -Recurse -Force
+
+# --- ffmpeg ---------------------------------------------------------------
+# The game's movies are Sofdec (MPEG) inside movie.afs, and the FMV path decodes
+# them by running ffmpeg. Linux gets it from the distribution; Windows has none,
+# so without this the intro and cutscenes are a BLACK SCREEN with the audio
+# still playing -- seen on the test laptop, and fixed there by dropping this
+# exact binary beside the launcher. The runtime invokes a bare "ffmpeg" and
+# Windows searches the working directory, which RingOut.cmd sets.
+#
+# PINNED, and LGPL not GPL. BtbN's "-gpl" builds add libx264/libx265/libxvid and
+# are GPL-3.0, which would conflict with the GPL-2.0 runtime and relicense the
+# whole distribution. The static build is one exe with no DLLs to ship.
+# Attribution and the source offer LGPL requires are in
+# windows\CREDITS-ffmpeg.txt, appended to CREDITS.txt above.
+Write-Host "==> ffmpeg"
+# Via Get-LatestAsset for the same reason llvm-mingw is: a hand-built URL rots.
+# The pattern deliberately excludes "-shared": the static build is a single exe
+# with no DLLs to ship alongside it.
+$ffUrl = Get-LatestAsset 'BtbN/FFmpeg-Builds' '*win64-lgpl-9.0.zip'
+$ffZip = Fetch $ffUrl 'ffmpeg.zip'
+Expand-Archive $ffZip -DestinationPath $dl -Force
+$ffExe = Get-ChildItem $dl -Recurse -File -Filter 'ffmpeg.exe' | Select-Object -First 1
+if (-not $ffExe) { throw "ffmpeg.exe not found in $ffUrl" }
+Copy-Item $ffExe.FullName $stage -Force
+Write-Host ("  ffmpeg.exe {0:N0} bytes" -f (Get-Item (Join-Path $stage 'ffmpeg.exe')).Length)
 
 # Trim what a module build never touches.
 #
@@ -188,7 +238,12 @@ Write-Host "  using $($iscc.FullName)"
 Copy-Item (Join-Path $PSScriptRoot 'ringout.iss') $OutDir -Force
 Push-Location $OutDir
 try {
-    & $iscc.FullName 'ringout.iss'
+    # /D overrides the .iss's own #define, so VERSION is the single source of
+    # truth and ringout.iss no longer decides what it is building.
+    # StageDir as well as AppVersion: the .iss packages a directory by name, and
+    # deriving it there from AppVersion would still be a second place that has
+    # to agree with $stage. Pass the one this script actually created.
+    & $iscc.FullName "/DAppVersion=$Version" "/DStageDir=$(Split-Path $stage -Leaf)" 'ringout.iss'
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
@@ -203,7 +258,10 @@ Remove-Item (Join-Path $OutDir 'ringout.iss') -Force -ErrorAction SilentlyContin
 # had no equivalent. It also ships a userdata\ subtree (GameSettings only), so
 # "no userdata" cannot be the rule here; name the sensitive files instead.
 Write-Host "==> checks"
-$forbidden = @('game', 'work', 'source', 'userdata\Config', 'userdata\GC',
+# 'art' matches package-dist.sh's list. setup.ps1 now extracts the game's own
+# banner and memory-card icon into art\ on the PLAYER's machine, and that is
+# publisher artwork -- exactly what must never end up in a package.
+$forbidden = @('game', 'work', 'source', 'art', 'userdata\Config', 'userdata\GC',
                'userdata\Logs', 'bin\gGRSEAF_recomp.so')
 foreach ($f in $forbidden) {
     if (Test-Path (Join-Path $stage $f)) {
@@ -220,10 +278,16 @@ if ($leaks) {
 }
 # Home paths compiled into a binary or left in a text file are the privacy axis
 # the checks above do not cover; privacy-scan.sh is the Linux equivalent.
-$paths = Select-String -Path (Join-Path $stage '*') -Recurse `
-    -Pattern 'C:\\Users\\[A-Za-z0-9_-]+|/home/[a-z0-9_-]+/|/Users/[A-Za-z0-9_-]+/' `
-    -List -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -notmatch '\\toolchain\\|\\llvm-mingw|\\Externals\\' }
+# Get-ChildItem -Recurse, THEN Select-String. Select-String has no -Recurse of
+# its own, and passing it one is a hard error -- which is why this step failed
+# with "A parameter cannot be found that matches parameter name 'Recurse'" the
+# first time this script was ever run, after the installer had already built.
+# The filter runs BEFORE Select-String so the bundled toolchain (~2 GB) is
+# skipped rather than scanned.
+$paths = Get-ChildItem $stage -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\toolchain\\|\\llvm-mingw|\\Externals\\|\\ffmpeg\.exe$' } |
+    Select-String -Pattern 'C:\\Users\\[A-Za-z0-9_-]+|/home/[a-z0-9_-]+/|/Users/[A-Za-z0-9_-]+/' `
+                  -List -ErrorAction SilentlyContinue
 if ($paths) {
     Write-Error "  FAIL: developer paths in the stage:"
     $paths | ForEach-Object { Write-Error "    $($_.Path): $($_.Matches[0].Value)" }
@@ -233,7 +297,7 @@ Write-Host "  clean"
 
 # --- zip ------------------------------------------------------------------
 Write-Host "==> zipping"
-$zip = Join-Path $OutDir 'RingOut-1.0-windows-x64.zip'
+$zip = Join-Path $OutDir "RingOut-$Version-windows-x64.zip"
 Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal -Force
 Remove-Item $dl -Recurse -Force -ErrorAction SilentlyContinue
 

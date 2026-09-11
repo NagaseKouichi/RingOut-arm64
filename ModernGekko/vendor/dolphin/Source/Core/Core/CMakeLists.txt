@@ -847,12 +847,26 @@ if(WIN32)
     HW/WiimoteReal/IOWin.cpp
     HW/WiimoteReal/IOWin.h
   )
+  # Bare names rather than setupapi.lib: MSVC appends .lib, MinGW links
+  # libsetupapi.a via -lsetupapi. Both exist in the MinGW sysroot.
+  # bthprops: IOWin.cpp asks for it with `#pragma comment(lib, "Bthprops.lib")`,
+  # which is an MSVC linker directive embedded in the object file. MinGW ignores
+  # such pragmas entirely, so the Bluetooth radio functions the real-Wiimote
+  # scanner calls go unresolved unless the library is named here.
   target_link_libraries(core PUBLIC
-    videod3d
-    videod3d12
-    setupapi.lib
-    iphlpapi.lib
+    setupapi
+    iphlpapi
+    bthprops
+    hid
   )
+  # The D3D backends are built only under MSVC (see VideoBackends/CMakeLists.txt
+  # -- they need C++/WinRT), so only link them where they exist.
+  if(MSVC)
+    target_link_libraries(core PUBLIC
+      videod3d
+      videod3d12
+    )
+  endif()
   target_compile_definitions(core PRIVATE "-D_WINSOCK_DEPRECATED_NO_WARNINGS")
 elseif(APPLE)
   target_sources(core PRIVATE

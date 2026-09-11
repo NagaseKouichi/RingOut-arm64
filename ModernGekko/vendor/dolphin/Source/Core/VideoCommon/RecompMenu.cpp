@@ -15,7 +15,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <map>
 #include <memory>
+#include <span>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -27,6 +29,7 @@
 #include <imgui.h>
 
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 
 #include "Common/Config/Config.h"
@@ -39,6 +42,7 @@
 #include "Core/Cheats/PatchEngine.h"
 #include "Core/Config/CheatSettings.h"
 #include "Core/Config/ConfigManager.h"
+#include "Core/Movie.h"
 #include "Core/Config/FreeLookSettings.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
@@ -50,6 +54,7 @@
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/State.h"
+#include "Core/StateFile.h"
 #include "Core/System.h"
 #include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerEmu/Control/Control.h"
@@ -58,7 +63,13 @@
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/MappingCommon.h"
 #include "InputCommon/InputConfig.h"
+#include "Common/CommonPaths.h"
+#include "Common/Image.h"
+#include "VideoCommon/AbstractGfx.h"
+#include "VideoCommon/AbstractTexture.h"
+#include "VideoCommon/TextureConfig.h"
 #include "VideoCommon/AsyncRequests.h"
+#include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VideoConfig.h"
@@ -118,6 +129,9 @@ enum class Tab
   Controls,
   Cheats,
   Mods,
+  States,
+  Replays,
+  Shots,
   Count,
 };
 
@@ -135,6 +149,11 @@ constexpr int kDeviceRow = 2;
 constexpr int kPort2Row = 3;
 constexpr int kControlsHeaderRows = 4;
 
+// SHOTS is a GRID, not a list: a gallery you have to walk one row at a time to
+// see anything is not a gallery. Left/Right step one image, Up/Down step a whole
+// row, and this is the number that makes the two agree.
+constexpr int kShotColumns = 4;
+
 const char* TabName(Tab tab)
 {
   switch (tab)
@@ -151,6 +170,12 @@ const char* TabName(Tab tab)
     return "CHEATS";
   case Tab::Mods:
     return "MODS";
+  case Tab::States:
+    return "STATES";
+  case Tab::Replays:
+    return "REPLAYS";
+  case Tab::Shots:
+    return "SHOTS";
   default:
     return "";
   }
@@ -166,10 +191,10 @@ const std::vector<Item>& TabItems(Tab tab)
       Item::LensFlares,       Item::Filter,      Item::Fullscreen,       Item::Apply};
   static const std::vector<Item> audio = {Item::Volume, Item::Muted, Item::AudioLatency,
                                           Item::FillGaps, Item::Apply};
+  static const std::vector<Item> states = {Item::StateSlot, Item::SaveState, Item::LoadState,
+                                          Item::AutoResume};
   static const std::vector<Item> system = {Item::Speed,        Item::Overclock,
-                                           Item::StateSlot,
-                                           Item::SaveState,    Item::LoadState,
-                                           Item::AutoResume,   Item::NetplayMode,
+                                           Item::NetplayMode,
                                            Item::NetplayScan,
                                            Item::NetplayAddress,
                                            Item::NetplayPort,  Item::NetplayStart,
@@ -185,9 +210,159 @@ const std::vector<Item>& TabItems(Tab tab)
     return audio;
   case Tab::System:
     return system;
+  case Tab::States:
+    return states;
   default:
     return none;
   }
+}
+
+// Replays live beside the other per-user data, so they survive a package
+// upgrade and are easy to hand to someone else -- a .dtm is a list of pad
+// states, tens of kilobytes for a whole match, not a video.
+std::string ReplayDir()
+{
+  return File::GetUserPath(D_USER_IDX) + "Replays/";
+}
+
+std::vector<std::string> ListReplays()
+{
+  std::vector<std::string> out;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(ReplayDir(), ec))
+  {
+    if (!entry.is_regular_file(ec))
+      continue;
+    if (entry.path().extension() == ".dtm")
+      out.push_back(entry.path().filename().string());
+  }
+  // Newest last would put the freshest recording behind every older one; sort
+  // so the list is stable and the arrows walk it predictably.
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// Screenshots are written by Core::SaveScreenShot, which puts them under the
+// user directory in a per-game folder. Reading them back is what makes them
+// worth taking: until now F9 wrote a PNG that nothing in the program ever
+// mentioned again, and F9 cannot be typed at all on a handheld.
+std::string ShotsDir()
+{
+  return File::GetUserPath(D_SCREENSHOTS_IDX) + SConfig::GetInstance().GetGameID() + DIR_SEP;
+}
+
+std::vector<std::string> ListShots()
+{
+  std::vector<std::string> out;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(ShotsDir(), ec))
+  {
+    if (!entry.is_regular_file(ec))
+      continue;
+    if (entry.path().extension() == ".png")
+      out.push_back(entry.path().filename().string());
+  }
+  // Newest FIRST here, unlike the replay list: a gallery is opened to see the
+  // shot just taken, and that one should not be at the bottom of a long list.
+  std::sort(out.begin(), out.end(), std::greater<>());
+  return out;
+}
+
+// WHETHER A SLOT HOLDS ANYTHING, which the tab never used to say. Deleting a
+// slot left the row reading exactly as it had before -- same number, same "Load
+// State" offer -- and loading it then did nothing at all, which looks like a
+// broken save rather than an empty one.
+//
+// A stat, twice per repaint, on a menu that only redraws while it is open. The
+// alternative is caching it and inventing an invalidation rule for a file three
+// different actions can write.
+bool StateSlotUsed(int slot)
+{
+  std::error_code ec;
+  return std::filesystem::exists(::State::MakeStateFilename(slot), ec);
+}
+
+// localtime_r is POSIX and does not exist on Windows; the MSVC/UCRT spelling is
+// localtime_s, which takes the SAME two arguments in the OPPOSITE order and
+// returns an errno rather than a pointer. Getting that backwards compiles on
+// neither, which is the one mercy here.
+void LocalTime(const std::time_t& when, std::tm& out)
+{
+#ifdef _WIN32
+  localtime_s(&out, &when);
+#else
+  localtime_r(&when, &out);
+#endif
+}
+
+std::string StateSlotWhen(int slot)
+{
+  std::error_code ec;
+  const auto path = ::State::MakeStateFilename(slot);
+  if (!std::filesystem::exists(path, ec))
+    return "empty";
+  const auto stamp = std::filesystem::last_write_time(path, ec);
+  if (ec)
+    return "saved";
+  // NOT std::chrono::clock_cast: the runtime is built by GCC 12 in the Debian
+  // container, for the glibc floor, and it does not have it. This is the
+  // portable conversion -- rebase the file clock onto the system clock by the
+  // difference between their two "now"s.
+  const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+      stamp - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+  const std::time_t when = std::chrono::system_clock::to_time_t(sys);
+  std::tm tm{};
+  LocalTime(when, tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%m-%d %H:%M", &tm);
+  return buf;
+}
+
+// Previews for save-state slots and recordings. Kept out of the screenshot
+// folder so a gallery never fills up with images the player did not take.
+std::string PreviewDir()
+{
+  return File::GetUserPath(D_USER_IDX) + "Previews" + DIR_SEP;
+}
+
+std::string StatePreviewPath(int slot)
+{
+  return PreviewDir() + "state_" + std::to_string(slot) + ".png";
+}
+
+std::string ReplayPreviewPath(const std::string& replay_file)
+{
+  return PreviewDir() + replay_file + ".png";
+}
+
+// A recording is named for when it was taken. Nothing in the game identifies a
+// match, and asking for a name through this menu would mean building a text
+// field for one row.
+std::string NewReplayName()
+{
+  const std::time_t now = std::time(nullptr);
+  std::tm tm{};
+  LocalTime(now, tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%d_%H-%M-%S.dtm", &tm);
+  return buf;
+}
+
+// Same shape as the netplay request below, and for the same reason: the
+// decision has to outlive this emulation session, because recording and
+// playback are both armed before the core boots.
+bool WriteReplayRequest(int mode, const std::string& file)
+{
+  std::error_code ec;
+  std::filesystem::create_directories(ReplayDir(), ec);
+  const std::string path = File::GetUserPath(D_USER_IDX) + "replay-request.ini";
+  std::ofstream out(path, std::ios::trunc);
+  if (!out)
+    return false;
+  out << "[Replay]\n"
+      << (mode == 1 ? "record = " : "play = ") << ReplayDir() << file << '\n';
+  out.close();
+  return static_cast<bool>(out);
 }
 
 // One cheat code flattened for the list: either an Action Replay or a Gecko
@@ -223,6 +398,26 @@ struct State
   // brings up the lobby. 0 = off, 1 = host, 2 = join.
   int netplay_mode = 0;
   int netplay_port = 2626;
+  // 0 = off, 1 = record the next session, 2 = play one back. Like netplay,
+  // this cannot be entered in place: a .dtm covers a session from power-on, so
+  // the choice is handed to the runner and the process restarts into it.
+  int replay_mode = 0;
+  int replay_index = 0;
+  std::vector<std::string> replay_files;
+
+  // The gallery. Listed on open, like the replays, so a shot taken a moment ago
+  // is there without restarting anything.
+  std::vector<std::string> shot_files;
+  // What is one press away from being deleted: the row index, and the tab it
+  // belongs to so an arm cannot survive a tab change either. Cleared whenever
+  // the selection moves, so it can never fire on something the cursor reached
+  // afterwards.
+  int delete_armed = -1;
+  Tab delete_armed_tab = Tab::Shots;
+  // What THIS session is recording to or playing back, set by the runtime when
+  // it arms one. The movie system knows the mode but not the filename, and the
+  // name is the part a player actually needs on screen.
+  std::string replay_active_name;
 
   // The address to join. The TEXT is authoritative and the octets are only the
   // editing affordance, because the frontend accepts a hostname and this row
@@ -320,6 +515,19 @@ int RowCount(const State& state)
     // action only when there is something to undo.
     return 2 + static_cast<int>(state.mod_rows.size()) +
            (state.game_data.status == RecompGameData::Status::Modified ? 1 : 0);
+  case Tab::Replays:
+    // what is happening now + the record action + one row per file on disk, or
+    // the "no replays" line that stands in for the list when it is empty. The
+    // draw side always emits that line, so counting only the files left a row
+    // on screen that navigation could never reach.
+    return 2 + (state.replay_files.empty()
+                    ? 1
+                    : static_cast<int>(state.replay_files.size()));
+  case Tab::Shots:
+    // One row per shot, or the empty line that stands in for the list -- the
+    // draw side always emits that line, so counting zero would leave a row on
+    // screen that navigation could never reach (the same trap as Replays).
+    return state.shot_files.empty() ? 1 : static_cast<int>(state.shot_files.size());
   default:
     return static_cast<int>(TabItems(state.tab).size());
   }
@@ -330,8 +538,12 @@ int RowCount(const State& state)
 // rescanning the folder are file I/O, and this file keeps I/O out from under
 // the lock. The in-memory row is flipped here anyway so the next redraw shows
 // the new value instead of lagging a frame.
+// allow_install gates the one row here that cannot be undone. Left/Right passes
+// false: arrows are how you look along a list, and a skin is written INTO the
+// game's archive -- it turns netplay off and comes back only by restoring the
+// game data from the player's own disc image. Enter passes true.
 void ToggleModRow(int index, std::string* toggle_name, bool* toggle_enabled, bool* reload,
-                  bool* save_config, int* install_mod)
+                  bool* save_config, int* install_mod, bool allow_install)
 {
   if (index == 0)
   {
@@ -351,7 +563,7 @@ void ToggleModRow(int index, std::string* toggle_name, bool* toggle_enabled, boo
   {
     // A skin is written into the game itself, so it is not a switch and cannot
     // be undone by pressing again -- removing it means restoring the game data.
-    if (mod.installable && !mod.installed)
+    if (allow_install && mod.installable && !mod.installed)
       *install_mod = mod_index;
     return;
   }
@@ -559,6 +771,42 @@ void HudBar(const char* label, float health, bool right_to_left)
   ImGui::ProgressBar(frac, ImVec2(230.0f, 16.0f), text);
   ImGui::PopStyleColor();
   (void)right_to_left;
+}
+
+// Shown while a replay is being recorded or played back, with the menu closed.
+// Recording is invisible otherwise: the only feedback was a line on stderr,
+// which a player never sees, and there is no way to tell a session that is
+// recording from one that is not.
+void DrawReplayIndicator()
+{
+  auto& movie = Core::System::GetInstance().GetMovie();
+  const bool recording = movie.IsRecordingInput();
+  const bool playing = movie.IsPlayingInput();
+  if (!recording && !playing)
+    return;
+
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  // Top-left: the training HUD owns the top-centre and the game's own timer sits
+  // beside it, so this goes in the one corner nothing else claims.
+  ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + 12.0f, vp->Pos.y + 12.0f), ImGuiCond_Always,
+                          ImVec2(0.0f, 0.0f));
+  ImGui::SetNextWindowBgAlpha(0.45f);
+  ImGui::Begin("ReplayIndicator", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+  if (recording)
+  {
+    // Blinks, because a static red dot reads as part of the game's own HUD.
+    const bool on = static_cast<int>(ImGui::GetTime() * 2.0) % 2 == 0;
+    ImGui::TextColored(on ? ImVec4(1.0f, 0.25f, 0.25f, 1.0f) : ImVec4(0.6f, 0.2f, 0.2f, 1.0f),
+                       "* REC");
+  }
+  else
+  {
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "> REPLAY");
+  }
+  ImGui::End();
 }
 
 void DrawTrainingHud()
@@ -1159,7 +1407,11 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return std::to_string(static_cast<int>(speed * 100.0f + 0.5f)) + "%";
   }
   case Item::StateSlot:
-    return std::to_string(state_slot);
+    return std::to_string(state_slot) + "  (" + StateSlotWhen(state_slot) + ")";
+  case Item::SaveState:
+    return StateSlotUsed(state_slot) ? "OVERWRITE" : "SAVE";
+  case Item::LoadState:
+    return StateSlotUsed(state_slot) ? "LOAD" : "-";
   case Item::AutoResume:
     return Config::Get(RECOMP_AUTO_RESUME) ? "ON" : "OFF";
   default:
@@ -1628,6 +1880,9 @@ enum class Action
   SaveState,
   LoadState,
   StartNetplay,
+  StartRecording,
+  StopRecording,
+  PlayReplay,
   ScanHosts,
 };
 
@@ -1766,9 +2021,19 @@ void Toggle()
     s_state.netplay_addr = seeded;
   }
 
+  // Listed on every open rather than once: a recording saved by the session
+  // that just ended is on disk now, and a player who records a match then looks
+  // for it expects to find it without restarting anything.
+  std::vector<std::string> replays = ListReplays();
+  std::vector<std::string> shots = ListShots();
+
   bool open_now;
   {
     std::lock_guard<std::mutex> guard(s_state.mutex);
+    s_state.replay_files = std::move(replays);
+    s_state.shot_files = std::move(shots);
+    if (s_state.replay_index >= static_cast<int>(s_state.replay_files.size()))
+      s_state.replay_index = 0;
     s_state.open = !s_state.open;
     open_now = s_state.open;
     if (open_now)
@@ -1817,6 +2082,7 @@ void OnKey(Key key)
   int netplay_mode_snapshot = 0;
   int netplay_port_snapshot = 2626;
   std::string netplay_addr_snapshot = "127.0.0.1";
+  std::string replay_file_snapshot;
   int resolution_to_persist = -1;
 
   // Deferred work. NOTHING below may call into Config/Core/InputConfig while
@@ -1843,6 +2109,10 @@ void OnKey(Key key)
   bool toggle_port2 = false;
   bool port2_enabled = false;
   std::string new_device;
+  // Set under the lock, acted on after it: removing a file is I/O, and the
+  // video thread blocks on this mutex inside Draw. A save state and a recording
+  // each have a preview beside them, so this is a list rather than one path.
+  std::vector<std::string> delete_paths;
   ControllerEmu::Control* changed_pad_control = nullptr;
   std::vector<ActionReplay::ARCode> ar_snapshot;
   std::vector<Gecko::GeckoCode> gecko_snapshot;
@@ -1891,6 +2161,7 @@ void OnKey(Key key)
         s_state.selected = row_count > 1 ? 1 : 0;
         break;
       case Key::Activate:
+      case Key::Delete:
         break;
       }
     }
@@ -1951,6 +2222,8 @@ void OnKey(Key key)
             s_state.netplay_addr_run = 0;
             s_state.netplay_addr_run_dir = 0;
             break;
+          case Key::Delete:
+            break;
           }
         }
         else
@@ -1962,6 +2235,37 @@ void OnKey(Key key)
 
       // The address lives in the request file and is persisted by the runner,
       // not in Dolphin's Config, so editing it never sets needs_config_save.
+      // Any movement disarms a pending delete: an arm that survived being
+      // navigated away from would fire on whatever the cursor had reached.
+      if (!address_edit_consumed_key && key != Key::Delete)
+        s_state.delete_armed = -1;
+
+      // SHOTS moves as a grid. Up/Down step a whole row rather than one image,
+      // and stepping off the top lands on the tab strip, which is how every
+      // other tab is left.
+      if (!address_edit_consumed_key && s_state.tab == Tab::Shots &&
+          (key == Key::Up || key == Key::Down || key == Key::Left || key == Key::Right))
+      {
+        switch (key)
+        {
+        case Key::Up:
+          s_state.selected = std::max(0, s_state.selected - kShotColumns);
+          break;
+        case Key::Down:
+          s_state.selected = std::min(row_count - 1, s_state.selected + kShotColumns);
+          break;
+        case Key::Left:
+          s_state.selected = std::max(1, s_state.selected - 1);
+          break;
+        case Key::Right:
+          s_state.selected = std::min(row_count - 1, s_state.selected + 1);
+          break;
+        default:
+          break;
+        }
+        address_edit_consumed_key = true;
+      }
+
       if (!address_edit_consumed_key)
       switch (key)
       {
@@ -1971,6 +2275,70 @@ void OnKey(Key key)
       case Key::Down:
         s_state.selected = (s_state.selected + 1) % row_count;
         break;
+      case Key::Delete:
+      {
+        // Arm, then confirm. A single press that deleted outright would be one
+        // stray button away from losing a picture that cannot be taken again,
+        // a match nobody recorded twice, or a save someone spent an evening
+        // reaching. The row says which state it is in.
+        //
+        // Deciding WHAT the cursor is on happens here; the removal itself waits
+        // until the mutex is released.
+        std::vector<std::string> targets;
+        switch (s_state.tab)
+        {
+        case Tab::Shots:
+          if (index >= 0 && index < static_cast<int>(s_state.shot_files.size()))
+            targets.push_back(ShotsDir() + s_state.shot_files[index]);
+          break;
+        case Tab::Replays:
+        {
+          // Rows 0 and 1 are the status line and the record action.
+          const int pick = index - 2;
+          if (pick >= 0 && pick < static_cast<int>(s_state.replay_files.size()))
+          {
+            const std::string& file = s_state.replay_files[pick];
+            // Never the one this session is writing: the movie system still
+            // holds it, and stopping would put it straight back.
+            if (file == s_state.replay_active_name &&
+                Core::System::GetInstance().GetMovie().IsRecordingInput())
+              break;
+            targets.push_back(ReplayDir() + file);
+            targets.push_back(ReplayPreviewPath(file));
+          }
+          break;
+        }
+        case Tab::States:
+          // The tab has no row per slot -- the slot is the value on the first
+          // row -- so this deletes whichever slot the tab is pointed at,
+          // whichever of its four rows the cursor happens to be on. An empty
+          // slot arms nothing, so Delete on one is silent rather than asking a
+          // question about a file that is not there.
+          if (StateSlotUsed(s_state.state_slot))
+          {
+            targets.push_back(::State::MakeStateFilename(s_state.state_slot));
+            targets.push_back(StatePreviewPath(s_state.state_slot));
+          }
+          break;
+        default:
+          break;
+        }
+
+        if (targets.empty())
+          break;
+
+        if (s_state.delete_armed == index && s_state.delete_armed_tab == s_state.tab)
+        {
+          delete_paths = std::move(targets);
+          s_state.delete_armed = -1;
+        }
+        else
+        {
+          s_state.delete_armed = index;
+          s_state.delete_armed_tab = s_state.tab;
+        }
+        break;
+      }
       case Key::Left:
       case Key::Right:
       {
@@ -2014,11 +2382,13 @@ void OnKey(Key key)
         }
         else if (s_state.tab == Tab::Mods)
         {
-          // Left/Right toggles the same rows Space does. Everything else in
+          // Left/Right toggles the same rows Enter does -- everything else in
           // this menu changes a value with the arrows, and a row that only
-          // answered to Space read as broken.
+          // answered to Enter read as broken -- EXCEPT installing a skin, which
+          // is not a toggle and cannot be pressed again to undo.
           ToggleModRow(index, &toggle_mod_name, &toggle_mod_enabled,
-                       &needs_texture_reload, &needs_config_save, &install_mod_index);
+                       &needs_texture_reload, &needs_config_save, &install_mod_index,
+                       /*allow_install=*/false);
         }
         else if (s_state.tab != Tab::Cheats)
         {
@@ -2029,7 +2399,30 @@ void OnKey(Key key)
         break;
       }
       case Key::Activate:
-        if (s_state.tab == Tab::Controls)
+        if (s_state.tab == Tab::Replays)
+        {
+          // Row 0 is the status line and does nothing. Row 1 records; the rest
+          // are the files on disk.
+          //
+          // Activate ONLY. This block first sat in the Left/Right branch, where
+          // the Mods toggles live, so an arrow key started a recording -- the
+          // one action on this tab that restarts the session.
+          if (index == 1)
+          {
+            auto& movie = Core::System::GetInstance().GetMovie();
+            if (movie.IsRecordingInput())
+              action = Action::StopRecording;
+            else if (!NetPlay::IsNetPlayRunning())
+              action = Action::StartRecording;
+          }
+          else if (index >= 2 &&
+                   index - 2 < static_cast<int>(s_state.replay_files.size()))
+          {
+            replay_file_snapshot = s_state.replay_files[index - 2];
+            action = Action::PlayReplay;
+          }
+        }
+        else if (s_state.tab == Tab::Controls)
         {
           const int control_index = index - kControlsHeaderRows;
           // On either header row, Space re-scans instead of rebinding: a pad
@@ -2077,7 +2470,8 @@ void OnKey(Key key)
             needs_restore_request = true;
           else
             ToggleModRow(index, &toggle_mod_name, &toggle_mod_enabled,
-                         &needs_texture_reload, &needs_config_save, &install_mod_index);
+                         &needs_texture_reload, &needs_config_save, &install_mod_index,
+                         /*allow_install=*/true);
         }
         else
         {
@@ -2104,6 +2498,33 @@ void OnKey(Key key)
 
   // Everything below runs with the mutex released, so these engine calls can
   // safely block without wedging the video thread inside Draw().
+  // Deleting is done here, with the mutex released, and the list is rebuilt from
+  // the folder rather than patched: the folder is the truth, and a rescan also
+  // picks up anything written since the menu opened.
+  if (!delete_paths.empty())
+  {
+    for (const std::string& path : delete_paths)
+    {
+      std::error_code ec;
+      // A missing preview is not a failure: everything recorded or saved before
+      // previews existed has none, and saying so on every delete would be noise.
+      const bool gone = std::filesystem::remove(path, ec);
+      std::fprintf(stderr, "[menu] delete %s: %s\n", path.c_str(),
+                   gone ? "ok" : (ec ? ec.message().c_str() : "not there"));
+    }
+
+    // Rebuilt from the folders rather than patched: they are the truth, and a
+    // rescan also picks up anything written since the menu opened.
+    std::vector<std::string> shots = ListShots();
+    std::vector<std::string> replays = ListReplays();
+    std::lock_guard<std::mutex> guard(s_state.mutex);
+    s_state.shot_files = std::move(shots);
+    s_state.replay_files = std::move(replays);
+    // A list just got shorter under the cursor. Row 0 is the tab strip, so the
+    // last row is at RowCount-1, and landing past it would select nothing.
+    s_state.selected = std::clamp(s_state.selected, 0, std::max(0, RowCount(s_state) - 1));
+  }
+
   if (needs_build_controls)
   {
     std::vector<ControlRow> built;
@@ -2290,6 +2711,51 @@ void OnKey(Key key)
     CloseAndResume();
     QuitOnceResumed(quit_callback);
     break;
+  case Action::StartRecording:
+  case Action::PlayReplay:
+  {
+    // Both are armed before the core boots, so both restart the session the way
+    // Start Netplay does. No auto-resume snapshot: a replay that began from a
+    // restored state would not match the recording.
+    if (!quit_callback)
+      break;
+    const bool record = action == Action::StartRecording;
+    const std::string file = record ? NewReplayName() : replay_file_snapshot;
+    if (file.empty() || !WriteReplayRequest(record ? 1 : 2, file))
+    {
+      std::fprintf(stderr, "[replay] could not write the request file\n");
+      break;
+    }
+    std::fprintf(stderr, "[replay] restarting to %s %s\n",
+                 record ? "record" : "play", file.c_str());
+    CloseAndResume();
+    QuitOnceResumed(quit_callback);
+    break;
+  }
+  case Action::StopRecording:
+  {
+    // Stopping does NOT restart: the recording is written where it stands and
+    // the session carries on, which is what "stop" should mean when you are
+    // mid-match and just want the file.
+    auto& movie = Core::System::GetInstance().GetMovie();
+    if (!movie.IsRecordingInput())
+      break;
+    const std::string path = ReplayDir() + s_state.replay_active_name;
+    movie.SaveRecording(path);
+    movie.EndPlayInput(false);
+
+    // A picture for the REPLAYS list. g_frame_dumper directly, NOT
+    // Core::SaveScreenShot: that one takes a CPUThreadGuard, and the core is
+    // paused here with the menu open. The request is non-blocking and sits
+    // until frames flow again, so what it captures is the moment play resumes
+    // -- the same match, seconds after the recording ended, rather than the
+    // last recorded frame.
+    File::CreateFullPath(PreviewDir());
+    if (g_frame_dumper)
+      g_frame_dumper->SaveScreenshot(ReplayPreviewPath(s_state.replay_active_name));
+    std::fprintf(stderr, "[replay] stopped; saved %s\n", path.c_str());
+    break;
+  }
   case Action::Quit:
     if (!quit_callback)
       break;
@@ -2325,8 +2791,14 @@ void OnKey(Key key)
       QuitOnceResumed(quit_callback);
     }
     break;
-  case Action::SaveState:
   case Action::LoadState:
+    if (!StateSlotUsed(slot))
+    {
+      OSD::AddMessage("Slot " + std::to_string(slot) + " is empty", 2000);
+      break;
+    }
+    [[fallthrough]];
+  case Action::SaveState:
   {
     // Closing is cosmetic -- the core is never paused, so RunOnCPUThread always
     // sees a running CPU thread and the queued job actually executes.
@@ -2335,9 +2807,23 @@ void OnKey(Key key)
     std::fprintf(stderr, "[menu] %s slot %d\n",
                  action == Action::SaveState ? "save" : "load", slot);
     if (action == Action::SaveState)
+    {
       ::State::Save(system, slot);
+      // WHY HERE AND NOWHERE ELSE. A screenshot request is serviced by the
+      // VIDEO thread on the next presented frame, and while the menu is open
+      // the core is paused and no frames are presented -- a request made in the
+      // menu would sit unserviced until the player resumed, then photograph
+      // whatever they resumed into. CloseAndResume has just run, so the core is
+      // live, the overlay is gone, and the frame that arrives is the one the
+      // save was taken at.
+      File::CreateFullPath(PreviewDir());
+      if (g_frame_dumper)
+        g_frame_dumper->SaveScreenshot(StatePreviewPath(slot));
+    }
     else
+    {
       ::State::Load(system, slot);
+    }
     break;
   }
   case Action::None:
@@ -2410,6 +2896,12 @@ void SetFastForward(bool enable)
   }
 }
 
+void SetActiveReplay(std::string name)
+{
+  std::lock_guard<std::mutex> guard(s_state.mutex);
+  s_state.replay_active_name = std::move(name);
+}
+
 void ScheduleAutoResumeLoad()
 {
   if (!Config::Get(RECOMP_AUTO_RESUME))
@@ -2435,11 +2927,169 @@ void ScheduleAutoResumeLoad()
   }).detach();
 }
 
+// ---------------------------------------------------------------- thumbnails
+//
+// VIDEO THREAD ONLY. Textures belong to the backend and Draw is the only place
+// that touches them, so none of this takes the state mutex -- and none of it
+// may be called from the host thread.
+//
+// ONE image is decoded per frame, not the whole page. A gallery of full-size
+// PNGs would otherwise stall the first repaint for as long as it takes to read
+// the folder, on the video thread, with the core paused. PumpFrame repaints at
+// ~60 Hz while the menu is open, so a page instead fills in over a few frames
+// and the player watches it happen.
+constexpr u32 kThumbMaxWidth = 320;
+constexpr std::size_t kThumbCacheMax = 64;
+
+struct Thumbnail
+{
+  std::unique_ptr<AbstractTexture> texture;
+  bool failed = false;  // missing or unreadable -- do not retry it every frame
+};
+
+std::map<std::string, Thumbnail> s_thumbs;
+int s_thumb_budget = 0;
+
+// Heavier weight for the menu, built from the same OSD font by OnScreenUI.
+// Null is normal -- before the atlas exists, and after it is torn down -- and
+// PushFont(nullptr, 0.0f) is a documented no-op, so no branch is needed at the
+// call site.
+ImFont* s_bold_font = nullptr;
+
+// Box-average down to at most kThumbMaxWidth. The shots are the size of the
+// internal render target -- 1920x1584 is ~12 MB of RGBA each, for something
+// drawn 320 px wide -- so a gallery that uploaded them whole would cost
+// hundreds of megabytes of VRAM to show one screen of images.
+void ShrinkRGBA(const u8* src, u32 sw, u32 sh, std::vector<u8>* out, u32* ow, u32* oh)
+{
+  const u32 factor = std::max<u32>(1, (sw + kThumbMaxWidth - 1) / kThumbMaxWidth);
+  const u32 dw = std::max<u32>(1, sw / factor);
+  const u32 dh = std::max<u32>(1, sh / factor);
+  out->assign(static_cast<std::size_t>(dw) * dh * 4, 0);
+
+  for (u32 y = 0; y < dh; ++y)
+  {
+    for (u32 x = 0; x < dw; ++x)
+    {
+      u32 acc[4] = {0, 0, 0, 0};
+      u32 n = 0;
+      for (u32 sy = y * factor; sy < std::min(sh, (y + 1) * factor); ++sy)
+      {
+        for (u32 sx = x * factor; sx < std::min(sw, (x + 1) * factor); ++sx)
+        {
+          const u8* px = src + (static_cast<std::size_t>(sy) * sw + sx) * 4;
+          for (int c = 0; c < 4; ++c)
+            acc[c] += px[c];
+          ++n;
+        }
+      }
+      u8* dst = out->data() + (static_cast<std::size_t>(y) * dw + x) * 4;
+      for (int c = 0; c < 4; ++c)
+        dst[c] = static_cast<u8>(n ? acc[c] / n : 0);
+    }
+  }
+  *ow = dw;
+  *oh = dh;
+}
+
+// nullptr means "nothing to draw yet" -- either this frame's decode budget is
+// spent, or the file is not readable. Both are transient enough that the caller
+// just leaves a gap.
+const AbstractTexture* Thumb(const std::string& path)
+{
+  // KEYED BY MODIFICATION TIME, not by path alone. A save-state slot written
+  // again, or a screenshot replacing one that failed to load, has to show its
+  // new content -- and the writer is the HOST thread, which must not touch this
+  // map to invalidate it. A stat per visible image per frame is far cheaper
+  // than the cross-thread machinery the alternative needs.
+  std::error_code ec;
+  const auto mtime = std::filesystem::last_write_time(path, ec);
+  const std::string key =
+      ec ? path
+  // The count is cast before it is stringified: file_time_type's rep is
+  // implementation-defined, and on MinGW it is not one of the types
+  // std::to_string overloads, so the call is ambiguous rather than wrong.
+         : path + "@" +
+               std::to_string(static_cast<long long>(mtime.time_since_epoch().count()));
+
+  if (const auto it = s_thumbs.find(key); it != s_thumbs.end())
+    return it->second.failed ? nullptr : it->second.texture.get();
+
+  if (s_thumb_budget <= 0)
+    return nullptr;
+  --s_thumb_budget;
+
+  // Bounded, so walking a folder of a thousand screenshots cannot grow the
+  // cache without limit. Dropping the whole map is fine: what is on screen is
+  // re-decoded within a few frames, one per frame, exactly as it was built.
+  if (s_thumbs.size() >= kThumbCacheMax)
+    s_thumbs.clear();
+
+  Thumbnail thumb;
+  std::string png;
+  Common::UniqueBuffer<u8> rgba;
+  u32 w = 0;
+  u32 h = 0;
+  if (!File::ReadFileToString(path, png) || png.empty() ||
+      !Common::LoadPNG(std::span<const u8>(reinterpret_cast<const u8*>(png.data()), png.size()),
+                       &rgba, &w, &h) ||
+      w == 0 || h == 0)
+  {
+    thumb.failed = true;
+    s_thumbs.emplace(key, std::move(thumb));
+    return nullptr;
+  }
+
+  std::vector<u8> small;
+  u32 tw = 0;
+  u32 th = 0;
+  ShrinkRGBA(rgba.data(), w, h, &small, &tw, &th);
+
+  const TextureConfig config(tw, th, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                             AbstractTextureType::Texture_2DArray);
+  thumb.texture = g_gfx->CreateTexture(config);
+  if (thumb.texture == nullptr)
+    thumb.failed = true;
+  else
+    thumb.texture->Load(0, tw, th, tw, small.data(), sizeof(u32) * tw * th);
+
+  const auto res = s_thumbs.emplace(key, std::move(thumb));
+  return res.first->second.failed ? nullptr : res.first->second.texture.get();
+}
+
+// Draws one thumbnail at a fixed width, or a labelled gap of the same size so
+// the layout does not jump as images arrive.
+void DrawThumb(const std::string& path, float width, const char* absent)
+{
+  const AbstractTexture* const tex = Thumb(path);
+  if (tex == nullptr)
+  {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float height = width * 3.0f / 4.0f;
+    ImGui::Dummy(ImVec2(width, height));
+    ImGui::GetWindowDrawList()->AddRect(start, ImVec2(start.x + width, start.y + height),
+                                        IM_COL32(90, 90, 90, 255));
+    if (absent != nullptr)
+    {
+      ImGui::GetWindowDrawList()->AddText(ImVec2(start.x + 8, start.y + height / 2 - 6),
+                                          IM_COL32(140, 140, 140, 255), absent);
+    }
+    return;
+  }
+  const float scale = width / static_cast<float>(tex->GetWidth());
+  ImGui::Image(*tex, ImVec2(width, static_cast<float>(tex->GetHeight()) * scale));
+}
+
 void Draw()
 {
+  // Refilled every frame: see the comment on kThumbMaxWidth for why exactly one
+  // image is decoded per repaint.
+  s_thumb_budget = 1;
+
   // The HUD is independent of the menu: it renders whenever enabled, and first
   // so an open menu draws over it.
   DrawTrainingHud();
+  DrawReplayIndicator();
 
   Tab tab;
   int selected;
@@ -2447,6 +3097,13 @@ void Draw()
   bool detecting;
   bool editing_address = false;
   bool cheats_enabled = false;
+  // What the selected row is a picture of, if anything. Chosen here so the
+  // draw side never reaches back into the state to ask.
+  std::string preview_path;
+  const char* preview_absent = nullptr;
+  std::vector<std::string> shot_names;
+  int shot_armed = -1;
+  bool delete_armed_here = false;
   std::string mod_message;
   // label, value, highlight-value-green
   std::vector<std::tuple<std::string, std::string, bool>> rows;
@@ -2460,6 +3117,9 @@ void Draw()
     selected = s_state.selected;
     state_slot = s_state.state_slot;
     detecting = s_state.detecting_control != nullptr;
+    delete_armed_here =
+        s_state.delete_armed >= 0 && s_state.delete_armed_tab == s_state.tab &&
+        s_state.delete_armed == s_state.selected - 1;
     editing_address = s_state.netplay_addr_octet >= 0;
 
     switch (tab)
@@ -2488,6 +3148,56 @@ void Draw()
           value = "-";
         rows.emplace_back(row.label, std::move(value), false);
       }
+      break;
+    }
+    case Tab::Replays:
+    {
+      // What is happening right now, named. "Recording"/"Playing" on its own
+      // does not tell you WHICH file, and that is the first thing anyone wants
+      // to know when they come back to this screen.
+      auto& movie = Core::System::GetInstance().GetMovie();
+      const bool recording = movie.IsRecordingInput();
+      const bool playing = movie.IsPlayingInput();
+      if (recording)
+        rows.emplace_back("Recording to " + s_state.replay_active_name, "REC", true);
+      else if (playing)
+        rows.emplace_back("Playing " + s_state.replay_active_name, "PLAY", true);
+      else
+        rows.emplace_back("Not recording", "-", false);
+
+      // One plain action rather than a mode to cycle: "set this to RECORD, then
+      // press that" was two steps for one intention, and neither row said what
+      // it was going to do.
+      if (recording)
+        rows.emplace_back("Stop Recording", "ENTER", false);
+      else if (NetPlay::IsNetPlayRunning())
+        rows.emplace_back("Start Recording", "OFF (netplay)", false);
+      else
+        rows.emplace_back("Start Recording", "ENTER", false);
+
+      for (const auto& file : s_state.replay_files)
+        rows.emplace_back("  " + file, "PLAY", false);
+      if (s_state.replay_files.empty())
+        rows.emplace_back("  (no replays in userdata/Replays)", "-", false);
+      // Rows 0 and 1 are the status line and the record action; the files start
+      // after them, and row 0 of all is the tab strip.
+      const int pick = s_state.selected - 1 - 2;
+      if (pick >= 0 && pick < static_cast<int>(s_state.replay_files.size()))
+      {
+        preview_path = ReplayPreviewPath(s_state.replay_files[pick]);
+        preview_absent = "recorded before previews existed";
+      }
+      break;
+    }
+    case Tab::Shots:
+    {
+      for (const auto& file : s_state.shot_files)
+        rows.emplace_back("  " + file, "", false);
+      if (s_state.shot_files.empty())
+        rows.emplace_back("  (none yet -- Guide on a pad, or F9)", "-", false);
+      // The grid draws from this copy, with the mutex released.
+      shot_names = s_state.shot_files;
+      shot_armed = s_state.delete_armed_tab == Tab::Shots ? s_state.delete_armed : -1;
       break;
     }
     case Tab::Mods:
@@ -2549,6 +3259,11 @@ void Draw()
       }
       break;
     default:
+      if (tab == Tab::States)
+      {
+        preview_path = StatePreviewPath(s_state.state_slot);
+        preview_absent = "no picture for this slot";
+      }
       for (const Item item : TabItems(tab))
         rows.emplace_back(ItemLabel(item),
                           ItemValue(item, state_slot, s_state.netplay_mode,
@@ -2568,10 +3283,28 @@ void Draw()
   const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
   const ImVec2 display = ImGui::GetIO().DisplaySize;
 
+  // A panel centred on the picture. Width is fixed rather than proportional:
+  // the tab strip is nine entries laid out with SameLine and wrapped at the
+  // old 460, and 560 is what clears it.
   ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Always,
                           ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSize(ImVec2(460.0f * scale, 0.0f), ImGuiCond_Always);
-  ImGui::SetNextWindowBgAlpha(0.88f);
+  ImGui::SetNextWindowSize(ImVec2(560.0f * scale, 0.0f), ImGuiCond_Always);
+
+  // Dressed to sit beside the game's own panels rather than on top of them:
+  // the blue gradient and white edge are the shape Soulcalibur II uses for its
+  // save and option dialogs. ImGui cannot gradient-fill a window background, so
+  // the frame is drawn by hand below and ImGui's own background is switched off
+  // here -- otherwise a flat grey would sit over the gradient.
+  // The game sets its own text in a heavy face, so the overlay does too. There
+  // is no bold OSD font to switch to -- ImGui is built here without FreeType,
+  // whose embolden flag would be the obvious route -- so OnScreenUI rasterises
+  // the same file a second time with RasterizerMultiply, which thickens the
+  // antialiased edge of every glyph. Passing null keeps the normal weight.
+  ImGui::PushFont(s_bold_font, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * scale, 14.0f));
 
   if (ImGui::Begin("##recomp_menu", nullptr,
                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs |
@@ -2580,6 +3313,14 @@ void Draw()
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoFocusOnAppearing))
   {
+    // Split so the panel can be painted UNDER content that has not been laid
+    // out yet. The window auto-resizes vertically, so its height is not known
+    // until the rows are placed; drawing the frame first would use the previous
+    // frame's height and lag visibly whenever a tab changes the row count.
+    // Channel 0 is the panel, channel 1 the content, merged at the end.
+    ImDrawList* const frame_dl = ImGui::GetWindowDrawList();
+    frame_dl->ChannelsSplit(2);
+    frame_dl->ChannelsSetCurrent(1);
     // Version from the build, not from a literal: this line said "Ver 1.0" in
     // every release up to and including 1.5, on the most-looked-at screen in
     // the program.
@@ -2607,33 +3348,92 @@ void Draw()
       }
       else
       {
-        ImGui::TextColored(ImVec4(0.45f, 0.45f, 0.45f, 1.0f), " %s ", TabName(t));
+        ImGui::TextColored(ImVec4(0.66f, 0.74f, 0.86f, 1.0f), " %s ", TabName(t));
       }
     }
 
     ImGui::Separator();
     ImGui::Spacing();
 
-    const float value_column = ImGui::GetContentRegionAvail().x - 110.0f * scale;
+    // Capped, not simply right-aligned. The band is as wide as the display now,
+    // so hanging the values off its right edge puts "OFF" most of a screen away
+    // from the setting it belongs to, and the pairing stops being readable at
+    // 1920 even though it looks fine at 1024. Values sit a fixed measure in
+    // from the labels instead, and only follow the edge on a narrow window.
+    const float value_column =
+        std::min(ImGui::GetContentRegionAvail().x - 110.0f * scale, 560.0f * scale);
     const float row_height = ImGui::GetTextLineHeightWithSpacing();
-    const bool scrolling = rows.size() > 14;
+    // SHOTS draws a grid of pictures instead of a list of filenames -- the
+    // point of a gallery is seeing several at once, and a one-at-a-time preview
+    // meant walking the whole folder to find anything.
+    if (tab == Tab::Shots)
+    {
+      if (shot_names.empty())
+      {
+        ImGui::TextColored(ImVec4(0.70f, 0.78f, 0.90f, 1.0f),
+                           "  no screenshots yet -- Guide on a pad, or F9");
+      }
+      else
+      {
+        const float cell = 120.0f * scale;
+        for (int i = 0; i < static_cast<int>(shot_names.size()); ++i)
+        {
+          if (i % kShotColumns != 0)
+            ImGui::SameLine();
+
+          const bool is_selected = selected == i + 1;
+          const ImVec2 corner = ImGui::GetCursorScreenPos();
+          DrawThumb(ShotsDir() + shot_names[i], cell, nullptr);
+          const ImVec2 end = ImGui::GetItemRectMax();
+
+          if (is_selected)
+          {
+            // Two rectangles, one inside the other, so the marker reads on both
+            // a bright shot and a dark one.
+            ImGui::GetWindowDrawList()->AddRect(ImVec2(corner.x - 2, corner.y - 2),
+                                                ImVec2(end.x + 2, end.y + 2),
+                                                IM_COL32(255, 220, 90, 255), 0.0f, 0, 3.0f);
+            ImGui::GetWindowDrawList()->AddRect(ImVec2(corner.x - 4, corner.y - 4),
+                                                ImVec2(end.x + 4, end.y + 4),
+                                                IM_COL32(40, 40, 40, 220), 0.0f, 0, 1.0f);
+          }
+          if (i == shot_armed)
+          {
+            ImGui::GetWindowDrawList()->AddRectFilled(corner, end, IM_COL32(200, 40, 40, 110));
+          }
+        }
+      }
+
+      // The name of the one under the cursor, since the grid cannot show names.
+      const int pick = selected - 1;
+      if (pick >= 0 && pick < static_cast<int>(shot_names.size()))
+      {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.90f, 0.94f, 1.0f, 1.0f), "%s", shot_names[pick].c_str());
+      }
+    }
+
+    // The grid above IS this tab's list, so the filename rows are skipped
+    // rather than drawn under it.
+    const bool grid_tab = tab == Tab::Shots;
+    const bool scrolling = rows.size() > 14 && !grid_tab;
 
     if (scrolling)
       ImGui::BeginChild("##rows", ImVec2(0.0f, row_height * 14.0f), false,
                         ImGuiWindowFlags_NoScrollbar);
 
-    if (rows.empty())
+    if (rows.empty() && !grid_tab)
     {
-      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  (nothing here)");
+      ImGui::TextColored(ImVec4(0.70f, 0.78f, 0.90f, 1.0f), "  (nothing here)");
       if (tab == Tab::Cheats)
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+        ImGui::TextColored(ImVec4(0.70f, 0.78f, 0.90f, 1.0f),
                            "  add codes to GameSettings/GRSEAF.ini");
       if (tab == Tab::Mods)
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+        ImGui::TextColored(ImVec4(0.70f, 0.78f, 0.90f, 1.0f),
                            "  put texture mods in Load/Mods/<name>/");
     }
 
-    for (size_t i = 0; i < rows.size(); ++i)
+    for (size_t i = 0; !grid_tab && i < rows.size(); ++i)
     {
       const bool is_selected = static_cast<int>(i) + 1 == selected;
       const ImVec4 color = is_selected ? ImVec4(1.0f, 1.0f, 0.45f, 1.0f) :
@@ -2653,12 +3453,29 @@ void Draw()
           ImGui::TextColored(color, "%s", value.c_str());
       }
 
+      // The armed row says so where the value goes, so the same two-step reads
+      // the same way on a list as it does on the grid.
+      if (is_selected && delete_armed_here)
+      {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "  DELETE?");
+      }
+
       if (is_selected && scrolling)
         ImGui::SetScrollHereY(0.5f);
     }
 
     if (scrolling)
       ImGui::EndChild();
+
+    // The picture the selected row stands for. Drawn with the state mutex
+    // released -- decoding and uploading a texture is not something to do while
+    // the host thread is blocked on the menu.
+    if (!preview_path.empty())
+    {
+      ImGui::Spacing();
+      DrawThumb(preview_path, 320.0f * scale, preview_absent);
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -2672,7 +3489,7 @@ void Draw()
     else if (editing_address)
       hint = "Left/Right octet   Up/Down value   Space done";
     else if (tab_focused)
-      hint = "Left/Right switch tab   Down enter list   Esc close";
+      hint = "Left/Right switch tab   Down enter list   Enter select   Esc close";
     else if (tab == Tab::Controls && selected == kPortRow + 1)
       hint = "Left/Right switch player   the rows below bind that pad   Esc close";
     else if (tab == Tab::Controls && selected == kPort2Row + 1)
@@ -2682,6 +3499,18 @@ void Draw()
       hint = "Left/Right change   Space rescan devices   Esc close";
     else if (tab == Tab::Controls)
       hint = "Space rebind   Left clear   Up/Down select   Esc close";
+    else if (delete_armed_here && tab == Tab::States)
+      hint = "Delete again to erase this slot   any arrow cancels";
+    else if (delete_armed_here && tab == Tab::Replays)
+      hint = "Delete again to erase this recording   any arrow cancels";
+    else if (delete_armed_here)
+      hint = "Delete again to remove it   any arrow cancels";
+    else if (tab == Tab::Shots)
+      hint = "Arrows move   Delete (X on a pad) removes   Esc close";
+    else if (tab == Tab::States)
+      hint = "Left/Right pick a slot   Space save or load   Delete erases it";
+    else if (tab == Tab::Replays)
+      hint = "Space plays   Delete (X on a pad) erases   Esc close";
     else if (tab == Tab::Cheats)
       hint = "Space toggle   Up/Down select   Esc close";
     else if (tab == Tab::Mods)
@@ -2694,9 +3523,42 @@ void Draw()
       hint = "Game data is modified -- restore it in MODS to play online.";
     if (tab == Tab::Mods && !mod_message.empty())
       hint = mod_message.c_str();
-    ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "%s", hint);
+    ImGui::TextColored(ImVec4(0.80f, 0.86f, 0.95f, 1.0f), "%s", hint);
+
+    // The panel itself, now that the content below it has fixed the height.
+    // Measured from the cursor rather than from GetWindowSize(), which reports
+    // an auto-resized window's size one frame late.
+    const ImVec2 panel_min = ImGui::GetWindowPos();
+    const ImVec2 panel_max(panel_min.x + ImGui::GetWindowSize().x,
+                           ImGui::GetCursorScreenPos().y + ImGui::GetStyle().WindowPadding.y);
+    frame_dl->ChannelsSetCurrent(0);
+    // Lighter at the top, deepening downwards. Opaque enough to read against a
+    // bright stage and still let the match show through.
+    frame_dl->AddRectFilledMultiColor(panel_min, panel_max,
+                                      IM_COL32(16, 44, 96, 242), IM_COL32(16, 44, 96, 242),
+                                      IM_COL32(2, 8, 28, 248), IM_COL32(2, 8, 28, 248));
+    // Two edges: a white outer line and a translucent inner one, which is what
+    // keeps the border from looking like a single hard pixel run at any scale.
+    // A heavy frame on all four sides, drawn INSIDE the panel. A draw list is
+    // clipped to the window rectangle and AddRect centres its stroke on the
+    // path, so a border sitting exactly on the edge loses its outer half --
+    // which once left the right and bottom sides with no line at all while the
+    // top and left looked perfectly correct.
+    const float rule = 4.0f;
+    frame_dl->AddRect(ImVec2(panel_min.x + rule * 0.5f, panel_min.y + rule * 0.5f),
+                      ImVec2(panel_max.x - rule * 0.5f, panel_max.y - rule * 0.5f),
+                      IM_COL32(255, 255, 255, 245), 0.0f, 0, rule);
+    // A dimmer companion just inside, which stops a heavy rule reading as a
+    // stuck row of pixels.
+    frame_dl->AddRect(ImVec2(panel_min.x + rule + 2.0f, panel_min.y + rule + 2.0f),
+                      ImVec2(panel_max.x - rule - 2.0f, panel_max.y - rule - 2.0f),
+                      IM_COL32(255, 255, 255, 70), 0.0f, 0, 1.0f);
+    frame_dl->ChannelsMerge();
   }
   ImGui::End();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(3);
+  ImGui::PopFont();
 }
 
 // Drives an in-progress input detection. Emulation is paused while the menu is
@@ -2933,6 +3795,23 @@ void PollMenuGamepad()
     }
   }
 
+  // SCREENSHOTS FROM THE PAD, because F9 cannot be typed on a handheld.
+  //
+  // Guide is the button for it: like Back and the stick clicks it is never
+  // bound by the generated GC pad profile, so it cannot collide with play, and
+  // it is where a console puts its capture button anyway. Taken while the menu
+  // is CLOSED, so the shot is of the game rather than of this overlay -- and
+  // the request is serviced by the video thread on the next frame, which only
+  // happens while the core is running.
+  {
+    static bool guide_held = false;
+    if (pressed("Guide", &guide_held) && !IsOpen())
+    {
+      Core::SaveScreenShot();
+      OSD::AddMessage("Screenshot saved -- see SHOTS in the pause menu", 3000);
+    }
+  }
+
   if (!IsOpen() || detecting)
   {
     // Still sample the rest so a button held while opening -- or held while it
@@ -2940,12 +3819,22 @@ void PollMenuGamepad()
     for (std::size_t i = 0; i < std::size(kBindings); ++i)
       pressed(kBindings[i].input, &held[i]);
     pressed("Button E", &held[std::size(kBindings) + 1]);
+    pressed("Button W", &held[std::size(kBindings)]);
     return;
   }
 
   if (pressed("Button E", &held[std::size(kBindings) + 1]))
   {
     OnEscape();  // unwinds one level, exactly as Escape does
+    return;
+  }
+  // X deletes, in the SHOTS grid only, and only as the second of two presses.
+  // Kept out of kBindings on purpose: those are navigation, and the button that
+  // destroys something should not sit in the same table as the ones that move
+  // the cursor.
+  if (pressed("Button W", &held[std::size(kBindings)]))
+  {
+    OnKey(Key::Delete);
     return;
   }
   for (std::size_t i = 0; i < std::size(kBindings); ++i)
@@ -3061,6 +3950,22 @@ void HostTick()
 // frames, so the overlay is not repainted while the menu is open -- it shows
 // whatever was on screen when the pause landed. Fixing that needs a redraw
 // posted TO the video thread (AsyncRequests), never a Present from here.
+// Called by OnScreenUI's destructor, on the VIDEO thread, before the backend
+// goes away. A static map of backend textures freed at process exit would run
+// after the graphics API is gone.
+void ReleaseGraphics()
+{
+  s_thumbs.clear();
+  // The atlas goes with the graphics backend, so the font pointer is dangling
+  // from here until OnScreenUI builds a new one.
+  s_bold_font = nullptr;
+}
+
+void SetBoldFont(ImFont* font)
+{
+  s_bold_font = font;
+}
+
 void PumpFrame()
 {
   if (!IsOpen())

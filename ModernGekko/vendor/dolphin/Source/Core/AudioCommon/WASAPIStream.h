@@ -3,7 +3,25 @@
 
 #pragma once
 
-#ifdef _WIN32
+// Dolphin's own WASAPI backend is MSVC-only in practice: it pulls in wil/, the
+// Windows Implementation Library, which does not survive a MinGW/libc++ build
+// (it breaks inside libc++'s own <atomic> internals). Excluded on MinGW.
+//
+// Nothing needs a stub. SoundStream declares `static bool IsValid() { return
+// false; }`, so WASAPIStream::IsValid() resolves to the inherited base and the
+// backend simply never offers itself -- the same path every non-Windows build
+// already takes. Audio still works: cubeb is enabled here, and cubeb's own
+// Windows backend is WASAPI.
+// This header is not self-contained without these: it derives from SoundStream,
+// and every declaration below needs them. Upstream has them inside the _WIN32
+// block, which only works because the .cpp is not compiled off Windows and
+// every other includer happens to pull SoundStream.h in first.
+#include <string>
+#include <vector>
+
+#include "AudioCommon/SoundStream.h"
+
+#if defined(_WIN32) && !defined(__MINGW32__)
 
 // clang-format off
 #include <Windows.h>
@@ -13,12 +31,8 @@
 // clang-format on
 
 #include <atomic>
-#include <string>
 #include <thread>
-#include <vector>
 #include <wrl/client.h>
-
-#include "AudioCommon/SoundStream.h"
 
 struct IAudioClient;
 struct IAudioRenderClient;
@@ -29,7 +43,7 @@ struct IMMDeviceEnumerator;
 
 class WASAPIStream final : public SoundStream
 {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(__MINGW32__)
 public:
   explicit WASAPIStream();
   ~WASAPIStream() override;

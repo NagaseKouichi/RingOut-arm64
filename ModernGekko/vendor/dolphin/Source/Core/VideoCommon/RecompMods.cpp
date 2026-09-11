@@ -12,13 +12,20 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <fcntl.h>
 #include <fstream>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <filesystem>
 #include <mutex>
 #include <system_error>
+
+#ifdef _WIN32
+#include <windows.h>
+
+#include "Common/StringUtil.h"
+#else
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace RecompMods
 {
@@ -69,12 +76,24 @@ const std::vector<Extractor>& Extractors()
 
 bool ToolExists(const std::string& tool)
 {
+#ifdef _WIN32
+  // There is no equivalent of the three fixed directories on Windows: these
+  // tools arrive wherever their installer put them and are reached through
+  // PATH. SearchPathW applies the same resolution the shell would, and the
+  // ".exe" default extension means the table below needs no per-platform
+  // spelling. Note 7z and bsdtar commonly are NOT on PATH on Windows even when
+  // installed -- 7-Zip does not add itself -- so expect fewer hits here than on
+  // Linux. Windows 10 1803+ does ship bsdtar as tar.exe.
+  const std::wstring wide = UTF8ToWString(tool);
+  return SearchPathW(nullptr, wide.c_str(), L".exe", 0, nullptr, nullptr) != 0;
+#else
   for (const char* dir : {"/usr/bin/", "/bin/", "/usr/local/bin/"})
   {
     if (File::Exists(dir + tool))
       return true;
   }
   return false;
+#endif
 }
 
 // fork/exec rather than system(): a mod folder is named by whatever the player
@@ -96,6 +115,90 @@ bool RunExtractor(const Extractor& ex, const std::string& archive, const std::st
     argv_storage.push_back(std::move(arg));
   }
 
+#ifdef _WIN32
+  // CreateProcessW, not _wsystem or ShellExecute: the same reasoning as the
+  // fork/exec below. Windows has no argv-array spawn, though -- the child
+  // parses one string -- so the argument vector has to be re-quoted by the
+  // documented CommandLineToArgvW rules, which is what Quote() does. Getting
+  // that wrong is exactly the injection the POSIX path avoids by construction,
+  // so it is done here once rather than per call site.
+  const auto quote = [](const std::string& arg) {
+    if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos)
+      return arg;
+
+    std::string out = "\"";
+    for (auto it = arg.begin();; ++it)
+    {
+      std::size_t backslashes = 0;
+      while (it != arg.end() && *it == '\\')
+      {
+        ++it;
+        ++backslashes;
+      }
+
+      if (it == arg.end())
+      {
+        // Escape the backslashes, but let the terminating quote stand.
+        out.append(backslashes * 2, '\\');
+        break;
+      }
+      if (*it == '"')
+      {
+        // Escape the backslashes AND the quote they precede.
+        out.append(backslashes * 2 + 1, '\\');
+      }
+      else
+      {
+        out.append(backslashes, '\\');
+      }
+      out.push_back(*it);
+    }
+    out.push_back('"');
+    return out;
+  };
+
+  std::string command_line;
+  for (const auto& a : argv_storage)
+  {
+    if (!command_line.empty())
+      command_line.push_back(' ');
+    command_line += quote(a);
+  }
+
+  // The child's output would otherwise land in the middle of the game's log.
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  const HANDLE null_handle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ,
+                                         &sa, OPEN_EXISTING, 0, nullptr);
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  if (null_handle != INVALID_HANDLE_VALUE)
+  {
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = null_handle;
+    si.hStdError = null_handle;
+    si.hStdInput = nullptr;
+  }
+
+  PROCESS_INFORMATION pi{};
+  std::wstring wide_command_line = UTF8ToWString(command_line);
+  const BOOL ok = CreateProcessW(nullptr, wide_command_line.data(), nullptr, nullptr,
+                                 null_handle != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW, nullptr,
+                                 nullptr, &si, &pi);
+  if (null_handle != INVALID_HANDLE_VALUE)
+    CloseHandle(null_handle);
+  if (!ok)
+    return false;
+
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD exit_code = 1;
+  const bool got_code = GetExitCodeProcess(pi.hProcess, &exit_code) != 0;
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return got_code && exit_code == 0;
+#else
   std::vector<char*> argv;
   for (auto& a : argv_storage)
     argv.push_back(a.data());
@@ -121,6 +224,7 @@ bool RunExtractor(const Extractor& ex, const std::string& archive, const std::st
   if (waitpid(pid, &status, 0) < 0)
     return false;
   return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
 }
 
 bool IsArchive(const std::string& ext)

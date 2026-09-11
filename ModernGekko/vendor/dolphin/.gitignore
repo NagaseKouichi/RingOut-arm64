@@ -54,3 +54,8 @@ CMakeLists.txt.user
 StrikersRecomp/generated_smc.txt
 StrikersRecomp/generated.c
 StrikersRecomp/generated.h
+
+# Build output that carried an upstream author's home path into a shipped
+# source tarball. See the top-level .gitignore for the same rule.
+__pycache__/
+*.pyc

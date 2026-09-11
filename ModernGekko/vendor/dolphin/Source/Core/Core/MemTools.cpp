@@ -42,6 +42,22 @@
 
 namespace EMM
 {
+
+// How many owners currently want the fault handler installed.
+//
+// Dolphin's design assumed exactly one. There are two: Core::EmuThread installs
+// it for the JIT, and StaticRecompCore installs it for the fallback JIT it
+// constructs itself, and which of them runs -- or both -- depends on how the
+// runtime was entered. On Linux the second install was a second sigaction with
+// the same handler and nothing complained, so this was invisible for as long as
+// Linux was the only target. On Windows the second install trips
+// ASSERT(!s_veh_handle) and the boot stops on a dialog.
+//
+// Counting owners fixes it for any number of them and needs no cooperation at
+// the call sites: the handler goes in on the first install and comes out on the
+// last uninstall. The alternative, making each caller check first, leaves the
+// same bug waiting for the third caller.
+static int s_handler_owners = 0;
 #ifdef _WIN32
 
 static PVOID s_veh_handle;
@@ -102,6 +118,8 @@ static LONG NTAPI Handler(PEXCEPTION_POINTERS pPtrs)
 
 void InstallExceptionHandler()
 {
+  if (s_handler_owners++ > 0)
+    return;
   ASSERT(!s_veh_handle);
   s_veh_handle = AddVectoredExceptionHandler(TRUE, Handler);
   ASSERT(s_veh_handle);
@@ -109,6 +127,8 @@ void InstallExceptionHandler()
 
 void UninstallExceptionHandler()
 {
+  if (s_handler_owners > 0 && --s_handler_owners > 0)
+    return;
   ULONG status = RemoveVectoredExceptionHandler(s_veh_handle);
   ASSERT(status);
   if (status)
@@ -225,6 +245,8 @@ static void ExceptionThread(mach_port_t port)
 
 void InstallExceptionHandler()
 {
+  if (s_handler_owners++ > 0)
+    return;
   mach_port_t port;
   CheckKR("mach_port_allocate",
           mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port));
@@ -249,6 +271,8 @@ void InstallExceptionHandler()
 
 void UninstallExceptionHandler()
 {
+  if (s_handler_owners > 0 && --s_handler_owners > 0)
+    return;
 }
 
 bool IsExceptionHandlerSupported()
@@ -308,6 +332,8 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 
 void InstallExceptionHandler()
 {
+  if (s_handler_owners++ > 0)
+    return;
   stack_t signal_stack;
 #ifdef __FreeBSD__
   signal_stack.ss_sp = (char*)malloc(SIGSTKSZ);
@@ -330,6 +356,8 @@ void InstallExceptionHandler()
 
 void UninstallExceptionHandler()
 {
+  if (s_handler_owners > 0 && --s_handler_owners > 0)
+    return;
   stack_t signal_stack;
   stack_t old_stack;
   signal_stack.ss_flags = SS_DISABLE;
@@ -352,10 +380,14 @@ bool IsExceptionHandlerSupported()
 
 void InstallExceptionHandler()
 {
+  if (s_handler_owners++ > 0)
+    return;
 }
 
 void UninstallExceptionHandler()
 {
+  if (s_handler_owners > 0 && --s_handler_owners > 0)
+    return;
 }
 
 bool IsExceptionHandlerSupported()
@@ -365,4 +397,8 @@ bool IsExceptionHandlerSupported()
 
 #endif
 
+bool IsExceptionHandlerInstalled()
+{
+  return s_handler_owners > 0;
+}
 }  // namespace EMM

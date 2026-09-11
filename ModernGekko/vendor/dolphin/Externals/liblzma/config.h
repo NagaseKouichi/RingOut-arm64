@@ -163,7 +163,17 @@
 #define HAVE_LIMITS_H 1
 
 /* Define to 1 if mbrtowc and mbstate_t are properly declared. */
+/* This file is a checked-in autotools result from a LINUX configure run, and
+   it has no platform conditionals. MSVC never reaches it (Windows builds use
+   the .vcxproj files), so a Windows target through CMake -- a MinGW
+   cross-build -- is the first thing to read it, and it claims POSIX functions
+   the UCRT does not have. wcwidth() is the one that bites: tuklib_mbstr_width.c
+   guards its use on HAVE_MBRTOWC && HAVE_WCWIDTH and falls back to treating
+   width as byte length, which is correct here -- this is xz's command-line
+   message formatting and nothing in the decoder Dolphin uses ever calls it. */
+#ifndef _WIN32
 #define HAVE_MBRTOWC 1
+#endif
 
 /* Define to 1 if you have the <memory.h> header file. */
 #define HAVE_MEMORY_H 1
@@ -286,7 +296,10 @@
 #define HAVE_VISIBILITY 1
 
 /* Define to 1 if you have the `wcwidth' function. */
+/* Not in the UCRT; see the note on HAVE_MBRTOWC above. */
+#ifndef _WIN32
 #define HAVE_WCWIDTH 1
+#endif
 
 /* Define to 1 if the system has the type `_Bool'. */
 #define HAVE__BOOL 1

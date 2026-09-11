@@ -6,6 +6,8 @@
 #include "Common/MsgHandler.h"
 #include "Core/Boot/Boot.h"
 #include "Core/Boot/BootManager.h"
+#include "Core/HW/SI/SI_Device.h"
+#include "Core/Movie.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/StaticRecompSettings.h"
@@ -410,6 +412,9 @@ void InitializeUICommon(const std::filesystem::path &user_directory) {
 std::unique_ptr<Platform> CreateHostPlatform(const RuntimeConfig &config) {
   if (config.headless)
     return Platform::CreateHeadlessPlatform();
+#ifdef _WIN32
+  return Platform::CreateWin32Platform();
+#endif
 #ifdef MODERNGEKKO_HAVE_COCOA
   return Platform::CreateMacOSPlatform();
 #endif
@@ -449,6 +454,19 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
       std::getenv("RINGOUT_DETERMINISM_DUALCORE") != nullptr;
   Config::SetBase(Config::MAIN_CPU_THREAD,
                   !RecompDeterminism::IsActive() || determinism_dual_core);
+
+  // Pinned, not derived from the host. Dolphin used to set this from the CPU's
+  // core count in Core::EmuThread, which meant the same game ran different DSP
+  // emulation on different machines -- and netplay never synced it (the server
+  // sends dsp_hle and dsp_enable_jit only), so two peers could differ with no
+  // warning. That is the same class of hazard as the RTC and single-core pins
+  // below, and it applies between two Linux machines as much as across
+  // platforms.
+  //
+  // false is Dolphin's own default for the setting (MainSettings.cpp), and is
+  // the reproducible choice: the DSP runs on the CPU thread rather than one
+  // whose scheduling the host decides.
+  Config::SetBase(Config::MAIN_DSP_THREAD, false);
   if (determinism_dual_core)
     Config::SetBase(Config::MAIN_GPU_DETERMINISM_MODE,
                     std::string("fake-completion"));
@@ -487,6 +505,16 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
 void ApplyGraphicsSettings(const GraphicsSettings &graphics, bool headless) {
   if (!graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, graphics.backend);
+#ifdef _WIN32
+  // Default to Direct3D on Windows. Vulkan is only present if the GPU driver
+  // installed vulkan-1.dll, and on a machine without it the failure is fatal
+  // and opaque -- "Failed to load Vulkan library", then "Failed to initialize
+  // video backend!", and the emulated CPU never starts (native=0). D3D11 ships
+  // with Windows itself, so it always works. This is the BASE layer, so a
+  // backend chosen in the settings menu still wins.
+  else if (!headless)
+    Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("D3D"));
+#endif
   else if (headless)
     Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
   if (graphics.internal_resolution_scale)
@@ -669,8 +697,82 @@ RuntimeRunResult Runtime::Run() {
             RuntimeError{RuntimeErrorCode::BootFailed,
                          "Dolphin rejected the extracted disc"}};
   }
+  // Replays are armed BEFORE the core boots. A .dtm covers the session from
+  // power-on -- Dolphin can anchor one to a savestate, but this port does not,
+  // so both paths are set up here and nowhere else.
+  //
+  // The pad plumbing already exists: SI_DeviceGCController calls
+  // HandleMoviePadStatus on every poll, which plays a recorded pad back or
+  // records the live one. Nothing had ever turned it on.
+  auto& movie = Core::System::GetInstance().GetMovie();
+  // A rebuilt session shares this process's MovieManager, and nothing clears
+  // its mode when a session ends -- Shutdown() empties the buffers and leaves
+  // PlayMode alone. Both BeginRecordingInput and PlayInput require
+  // PlayMode::None, so the SECOND replay in one process was refused: recording
+  // a match and then playing one back from the menu failed with "could not read
+  // the replay" on a file that was perfectly readable.
+  if (movie.IsMovieActive())
+    movie.EndPlayInput(false);
+  if (!m_impl->config.replay_movie.empty()) {
+    std::optional<std::string> savestate_path;
+    if (!movie.PlayInput(m_impl->config.replay_movie.string(), &savestate_path)) {
+      m_impl->running = false;
+      return {RuntimeExitReason::BootFailed,
+              RuntimeError{RuntimeErrorCode::InvalidState,
+                           "could not read the replay: " +
+                               m_impl->config.replay_movie.string()}};
+    }
+    // Read-only, or playback would overwrite the file it is playing the moment
+    // the recording runs out of input.
+    movie.SetReadOnly(true);
+    RecompMenu::SetActiveReplay(m_impl->config.replay_movie.filename().string());
+    std::fprintf(stderr, "[replay] playing %s\n",
+                 m_impl->config.replay_movie.string().c_str());
+  } else if (!m_impl->config.record_movie.empty()) {
+    Movie::ControllerTypeArray controllers{};
+    Movie::WiimoteEnabledArray wiimotes{};
+    // Ports are recorded as GC pads exactly where the runtime attached one, so
+    // a two-player match records both sides and a one-player match does not
+    // claim a second pad that was never there.
+    for (size_t port = 0; port < controllers.size(); ++port) {
+      const auto device = Config::Get(Config::GetInfoForSIDevice(static_cast<int>(port)));
+      // SIDevice_IsGCController, not equality with SIDEVICE_GC_CONTROLLER: the
+      // GC family covers the keyboard, steering wheel, dancemat and the adapter
+      // variants too, and an equality test quietly recorded a header with no
+      // input in it -- a 256-byte .dtm that looks like a successful recording.
+      controllers[port] = SerialInterface::SIDevice_IsGCController(device)
+                              ? Movie::ControllerType::GC
+                              : Movie::ControllerType::None;
+    }
+    if (!movie.BeginRecordingInput(controllers, wiimotes)) {
+      m_impl->running = false;
+      return {RuntimeExitReason::BootFailed,
+              RuntimeError{RuntimeErrorCode::InvalidState,
+                           "could not start recording a replay"}};
+    }
+    int ports = 0;
+    for (const auto c : controllers)
+      ports += c == Movie::ControllerType::GC ? 1 : 0;
+    RecompMenu::SetActiveReplay(m_impl->config.record_movie.filename().string());
+    std::fprintf(stderr, "[replay] recording %d pad(s) to %s\n", ports,
+                 m_impl->config.record_movie.string().c_str());
+  }
+
   m_impl->state_hook =
       Core::AddOnStateChangedCallback([this](Core::State state) {
+        // Written on the STOPPING edge. Core.cpp's EmuThread holds a ScopeGuard
+        // that calls Movie::Shutdown(), which clears the recorded input, and
+        // that runs before control returns from the platform main loop -- so a
+        // save afterwards wrote a valid 256-byte header with no input in it and
+        // looked like it had worked.
+        if (state == Core::State::Stopping && !m_impl->config.record_movie.empty()) {
+          auto& m = Core::System::GetInstance().GetMovie();
+          if (m.IsRecordingInput()) {
+            m.SaveRecording(m_impl->config.record_movie.string());
+            std::fprintf(stderr, "[replay] saved %s\n",
+                         m_impl->config.record_movie.string().c_str());
+          }
+        }
         if (state == Core::State::Uninitialized && m_impl->platform)
           m_impl->platform->Stop();
       });

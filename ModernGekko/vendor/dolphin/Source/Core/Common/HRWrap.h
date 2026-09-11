@@ -6,7 +6,19 @@
 #include <fmt/format.h>
 #include <string>
 #include <winerror.h>
+
+// C++/WinRT ships with Visual Studio, not with MinGW. It is used here only to
+// turn an HRESULT into a readable sentence, which FormatMessageW does just as
+// well -- see HRWrap.cpp. Keeping this working matters: the alternative was
+// dropping DirectInput, whose sources are the only thing that includes this
+// header, and with it support for older controllers.
+#ifdef __MINGW32__
+// winrt/base.h pulled in the Windows headers as a side effect; HRESULT itself
+// comes from windef.h, not winerror.h.
+#include <windows.h>
+#else
 #include <winrt/base.h>
+#endif
 
 #include "Common/CommonTypes.h"
 
@@ -35,6 +47,7 @@ struct fmt::formatter<Common::HRWrap>
   }
 };
 
+#ifndef __MINGW32__
 template <>
 struct fmt::formatter<winrt::hresult>
 {
@@ -45,3 +58,4 @@ struct fmt::formatter<winrt::hresult>
     return fmt::format_to(ctx.out(), "{} ({:#010x})", Common::GetHResultMessage(hr), hr.value);
   }
 };
+#endif  // !__MINGW32__

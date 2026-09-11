@@ -12,6 +12,14 @@
 #include "Common/CommonFuncs.h"
 #include "Common/Logging/Log.h"
 
+#ifndef __callback
+// An MSVC SAL annotation marking a function as a callback. MinGW's sal.h
+// carries the _In_ family used below but not this one. SAL annotations convey
+// nothing to the code generator, so defining it empty is exact rather than an
+// approximation.
+#define __callback
+#endif
+
 namespace Common
 {
 std::optional<std::wstring> GetPropertyHelper(auto function, auto dev,

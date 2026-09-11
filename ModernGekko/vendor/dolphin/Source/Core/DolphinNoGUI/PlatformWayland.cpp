@@ -695,6 +695,10 @@ void PlatformWayland::HandleHotkey(xkb_keysym_t symbol)
     case XKB_KEY_KP_Enter:
       RecompMenu::OnKey(RecompMenu::Key::Activate);
       return;
+    case XKB_KEY_Delete:
+    case XKB_KEY_KP_Delete:
+      RecompMenu::OnKey(RecompMenu::Key::Delete);
+      return;
     default:
       return;
     }

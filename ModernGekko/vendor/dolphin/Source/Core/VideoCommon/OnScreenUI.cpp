@@ -32,6 +32,8 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/PerformanceMetrics.h"
 #include "VideoCommon/Present.h"
+#include <cstdio>
+
 #include "VideoCommon/RecompMenu.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -102,6 +104,22 @@ bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
     io.Fonts->AddFontFromFileTTF(file.c_str());
   }
 
+  // A second, heavier instance of the same face for the pause overlay, which is
+  // set in a bold face in the game itself. There is no bold OSD_Font to load
+  // and imgui is built here without FreeType, so its embolden flag is not
+  // available; RasterizerMultiply raises the coverage of every antialiased
+  // pixel instead, which thickens the glyph edge and reads as a heavier weight
+  // at OSD sizes. It is the same file either way, so metrics and layout are
+  // unchanged and nothing else in the atlas moves.
+  {
+    ImFontConfig bold_config;
+    bold_config.RasterizerMultiply = 1.9f;
+    std::snprintf(bold_config.Name, sizeof(bold_config.Name), "OSD_Font (bold)");
+    ImFont* const bold = font_exists ? io.Fonts->AddFontFromFileTTF(file.c_str(), 0.0f, &bold_config)
+                                     : io.Fonts->AddFontDefault(&bold_config);
+    RecompMenu::SetBoldFont(bold);
+  }
+
   // Setup new font management behavior
   io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
 
@@ -119,6 +137,7 @@ OnScreenUI::~OnScreenUI()
 {
   std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
 
+  RecompMenu::ReleaseGraphics();
   ImGui::EndFrame();
   ImPlot::DestroyContext();
   ImGui::DestroyContext();

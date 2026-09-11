@@ -9,7 +9,12 @@ add_library(usb STATIC EXCLUDE_FROM_ALL
 dolphin_disable_warnings(usb)
 
 set_target_properties(usb PROPERTIES VERSION 1.0.26)
-if(WIN32)
+if(MSVC)
+  # libusb/msvc/config.h is a hand-maintained MSVC config and says so itself:
+  # it #errors with "Please make sure the msvc/ directory is removed from your
+  # build path" whenever _MSC_VER is not set. A MinGW cross-build must take the
+  # branch below instead, where configure_file() generates a config.h from
+  # CMake feature checks run against the actual target compiler.
   target_include_directories(usb BEFORE PUBLIC libusb/libusb PRIVATE libusb/msvc)
 else()
 target_include_directories(usb

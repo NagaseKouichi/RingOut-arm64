@@ -1,0 +1,30 @@
+
+FFmpeg (Windows packages only)
+------------------------------
+  This package bundles ffmpeg.exe. The game's movies are Sofdec (MPEG) video
+  inside movie.afs, and the FMV path decodes them by running ffmpeg. On Linux
+  ffmpeg comes from the distribution; Windows has none, so it ships here.
+  Without it the movies are a black screen with the audio still playing.
+
+  Build     BtbN FFmpeg-Builds, ffmpeg-n9.0-latest-win64-lgpl-9.0 (static)
+  Licence   LGPL-3.0-or-later       (built --enable-version3)
+  Modified  no -- shipped exactly as published, byte for byte
+
+  The exact build is whichever that rolling asset held when this package was
+  made; `ffmpeg.exe -version` in this folder prints it, and that string is what
+  identifies the source revision below.
+
+  LGPL requires that you can get the source for this component and relink it.
+  Both halves are public and unmodified:
+
+    FFmpeg source, tag n9.0.1   https://github.com/FFmpeg/FFmpeg
+    the build recipe used       https://github.com/BtbN/FFmpeg-Builds
+
+  This build deliberately excludes the GPL-only encoders (no libx264, libx265,
+  libxvid, libdavs2, libxavs2), which is why it is LGPL rather than GPL and why
+  it imposes no licence obligation on the rest of this package. Do not swap in
+  a "-gpl" ffmpeg build without revisiting that: it would make the combined
+  distribution GPL-3.0, which conflicts with the GPL-2.0 runtime.
+
+  ffmpeg is not started with any input this project does not construct itself:
+  the only invocation is a read of the player's own movie.afs.

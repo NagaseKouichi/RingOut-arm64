@@ -10,6 +10,9 @@
 
 #ifdef _WIN32
 #include <ws2ipdef.h>
+// ip_mreq: the SDK happens to reach it through ws2ipdef.h, but MinGW keeps it
+// in psdk_inc/_ip_mreq1.h, which ws2tcpip.h is what actually pulls in.
+#include <ws2tcpip.h>
 #else
 #include <sys/select.h>
 #include <sys/socket.h>

@@ -10,24 +10,21 @@ on:
         description: 'Upload the release asset (default: build only)'
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - 'ModernGekko/**'
-      - 'DolRecomp/**'
-      # The packaging script and the shipped scaffolding are part of what this
-      # workflow produces. Leaving them out meant a fix to the packaging script
-      # pushed cleanly, triggered nothing, and looked green against the PREVIOUS
-      # run's result.
-      #
-      # Named individually rather than '.github/scripts/**'. The glob woke a
-      # windows-2022 runner -- billed at 2x, ~28 minutes -- for every change to
-      # a Deck or Linux script that Windows never reads. These are the only two
-      # this job actually consumes; add to the list when that stops being true.
-      - '.github/workflows/windows.yml'
-      - '.github/scripts/package-windows.ps1'
-      - '.github/scripts/ringout.iss'
-      - 'dist/RingOut-1.0-dist/**'
+# DISPATCH ONLY, since 2026-09-08. There is no `push:` trigger any more, for
+# the same reason deck.yml lost its one on 2026-08-17 -- and this job is worse
+# on every axis that mattered there.
+#
+# The old filter matched 'ModernGekko/**' and 'DolRecomp/**', which is nearly
+# every commit that touches the runtime, and a windows-2022 runner bills at 2x
+# against 2,000 included minutes a month on a private repo. August was already
+# exhausted once that way (~2,312 minutes), which is what took the Deck job
+# down and left it failing in three seconds with no runner assigned. Merging
+# the Windows branch fired this twice in one afternoon by itself.
+#
+# The Linux and Deck checks that used to justify a push trigger already run in
+# .githooks/pre-push, on the debian:12 container, before anything leaves the
+# machine. Nothing equivalent exists for MSVC -- so run this deliberately, when
+# a Windows answer is actually wanted, rather than on every runtime commit.
 
 permissions:
   contents: write
@@ -137,9 +134,19 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" $extra --title "$title" \
               --notes "Built from ${GITHUB_SHA}." --target "$GITHUB_SHA"
-          gh release upload "$tag" \
-            package/RingOut-1.0-windows-x64-setup.exe \
-            package/RingOut-1.0-windows-x64.zip --clobber
+          # Glob, not a hardcoded 1.0: package-windows.ps1 names these from the
+          # VERSION file now (559ee1eb), so naming them here as well would put
+          # the version in a third place and break the upload the moment they
+          # disagree -- which they already did.
+          shopt -s nullglob
+          assets=(package/RingOut-*-windows-x64-setup.exe package/RingOut-*-windows-x64.zip)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "no package artifacts to upload; package/ holds:" >&2
+            ls -la package >&2 || true
+            exit 1
+          fi
+          printf 'uploading: %s\n' "${assets[@]}"
+          gh release upload "$tag" "${assets[@]}" --clobber
 
       # A failed configure/build leaves the useful detail in these logs rather
       # than in the step output.

@@ -39,6 +39,8 @@ void Usage() {
                "       [--graphics <backend>] [--audio <backend>]\n"
                "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
                "       [--widescreen]   (16:9; also Alt+W in-game)\n"
+               "       [--record <file.dtm>]  record this session as a replay\n"
+               "       [--replay <file.dtm>]  play a recorded session back\n"
                "       [--netplay-host | --netplay-join <host>] "
                "[--netplay-port <port>]\n"
                "       [--nickname <name>] [--buffer <auto|1-20>] "
@@ -74,6 +76,11 @@ ReadDefaultGame(const std::filesystem::path &user_directory) {
 }
 
 std::filesystem::path DefaultUserDirectory() {
+#if defined(_WIN32)
+  if (const char *local_app_data = std::getenv("LOCALAPPDATA"))
+    return std::filesystem::path(local_app_data) /
+           MODERNGEKKO_USER_DIRECTORY_NAME;
+#endif
   if (const char *xdg = std::getenv("XDG_DATA_HOME"))
     return std::filesystem::path(xdg) / MODERNGEKKO_USER_DIRECTORY_NAME;
   if (const char *home = std::getenv("HOME"))
@@ -83,7 +90,9 @@ std::filesystem::path DefaultUserDirectory() {
 }
 
 std::string LibrarySuffix() {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  return ".dll";
+#elif defined(__APPLE__)
   return ".dylib";
 #else
   return ".so";
@@ -139,6 +148,51 @@ std::filesystem::path ExecutableDirectory(const char *argv0) {
 // InspectGame reads: sys/{boot.bin,bi2.bin,apploader.img,main.dol,fst.bin} plus
 // files/. ExportSystemData writes that sys/ set exactly, so this is wiring,
 // not a reimplementation.
+// Consume <userdir>/replay-request.ini, if the in-game menu left one, and arm
+// the session it asks for. Returns true when it changed something.
+//
+// Deleted before it is acted on: a request that survived a crash would relaunch
+// into recording for ever with no way back to normal play.
+bool ApplyReplayRequest(moderngekko::RuntimeConfig *config) {
+  const std::filesystem::path request_path =
+      config->user_directory / "replay-request.ini";
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(request_path, ec))
+    return false;
+  std::string record_path;
+  std::string play_path;
+  {
+    std::ifstream request(request_path);
+    std::string line;
+    while (std::getline(request, line)) {
+      const auto eq = line.find('=');
+      if (eq == std::string::npos)
+        continue;
+      auto trim = [](std::string v) {
+        const auto b = v.find_first_not_of(" \t\r");
+        const auto e = v.find_last_not_of(" \t\r");
+        return b == std::string::npos ? std::string() : v.substr(b, e - b + 1);
+      };
+      const std::string key = trim(line.substr(0, eq));
+      const std::string value = trim(line.substr(eq + 1));
+      if (key == "record")
+        record_path = value;
+      else if (key == "play")
+        play_path = value;
+    }
+  }
+  std::filesystem::remove(request_path, ec);
+  config->record_movie.clear();
+  config->replay_movie.clear();
+  if (!record_path.empty())
+    config->record_movie = record_path;
+  else if (!play_path.empty())
+    config->replay_movie = play_path;
+  else
+    return false;
+  return true;
+}
+
 int RunExtract(const std::string &image, const std::string &out_dir) {
   const std::unique_ptr<DiscIO::VolumeDisc> volume = DiscIO::CreateDisc(image);
   if (!volume) {
@@ -223,6 +277,10 @@ int RunMain(int argc, char **argv) {
       config.window_system = moderngekko::WindowSystem::Wayland;
     else if (arg == "--widescreen")
       config.graphics.widescreen = true;
+    else if (arg == "--record")
+      config.record_movie = value("--record");
+    else if (arg == "--replay")
+      config.replay_movie = value("--replay");
     else if (arg == "--headless")
       config.headless = true;
     else if (arg == "--allow-interpreter")
@@ -300,6 +358,12 @@ int RunMain(int argc, char **argv) {
   }
   config.graphics.internal_resolution_scale = frontend_config.dolphin_scale;
   config.show_fps_in_title = frontend_config.show_fps_in_title;
+
+  // Recording a replay while playing one back would write the file being read.
+  if (!config.record_movie.empty() && !config.replay_movie.empty()) {
+    std::cerr << "--record and --replay cannot be used together\n";
+    return 2;
+  }
 
   // --keyboard rewrites the pad profile, so it overrides an existing one; the
   // implicit default below only ever fills in a missing profile. Layout 2 is a
@@ -384,7 +448,7 @@ int RunMain(int argc, char **argv) {
     config.module =
         moderngekko::ModuleSource::DynamicPath(std::move(module_path));
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   if (!config.headless && config.graphics.backend.empty())
     config.graphics.backend = "Vulkan";
 #endif
@@ -428,8 +492,21 @@ int RunMain(int argc, char **argv) {
     frontend_config.netplay_port = options.port;
     frontend_config.netplay_nickname = options.nickname;
     frontend_config.netplay_buffer = options.buffer;
-    frontend_config.controllers = options.controllers;
-    frontend_config.controller = options.controllers.front();
+    // Persist the real selection only. "Keyboard" above is a placeholder for
+    // "this machine claims one pad slot", not a device: saved, it comes back on
+    // the next launch as a controller the player chose, and was written into
+    // GCPadNew.ini as `Device = Keyboard`, which binds to nothing. The frontend
+    // now refuses to write a non-device, so this is belt and braces -- but a
+    // saved placeholder also suppresses gamepad detection, which no downstream
+    // check can undo.
+    std::vector<std::string> saved_controllers;
+    for (const std::string &controller : options.controllers) {
+      if (controller != "Keyboard")
+        saved_controllers.push_back(controller);
+    }
+    frontend_config.controllers = saved_controllers;
+    frontend_config.controller =
+        saved_controllers.empty() ? std::string{} : saved_controllers.front();
     std::string controller_message;
     // Disabled: this list is a per-machine NETPLAY assignment, so a second
     // local pad must not be mapped to port 2 here. The ordinary launch path
@@ -452,6 +529,12 @@ int RunMain(int argc, char **argv) {
         std::move(config), std::move(frontend_config), std::move(options));
   }
 
+  // The menu's Replay rows write a request and quit rather than trying to start
+  // recording in place: a .dtm covers a session from power-on. Read once here,
+  // for a request left by a session that has already exited, and again after
+  // this session ends, which is the path a menu press actually takes.
+  ApplyReplayRequest(&config);
+
   // Runtime::Create takes the config by move, so anything needed after the
   // session ends has to be kept here. The in-game menu's "Start Netplay" needs
   // both: the user directory to find the request it wrote, and the whole config
@@ -460,6 +543,13 @@ int RunMain(int argc, char **argv) {
   // working directory and makes the restart look like it never fired.
   const moderngekko::RuntimeConfig session_config = config;
 
+  // Sessions are rebuilt in a loop, not by exiting: "Start Replay" tears the
+  // core down and writes a request, and the player expects the game to come
+  // back armed. Quitting instead left the request on disk and the window shut,
+  // which reads as a crash -- and the request then fired on the NEXT manual
+  // launch, hours later. Start Netplay has always rebuilt in place; this is the
+  // same contract.
+  for (;;) {
   auto created = moderngekko::Runtime::Create(std::move(config));
   if (!created) {
     std::cerr << "initialization failed: " << created.error->message << '\n';
@@ -485,6 +575,18 @@ int RunMain(int argc, char **argv) {
   if (result.error) {
     std::cerr << "runtime failed: " << result.error->message << '\n';
     return 1;
+  }
+
+  // A replay request from the menu: rebuild from the same settings this session
+  // started with, with recording or playback armed, and go round again.
+  {
+    moderngekko::RuntimeConfig next = session_config;
+    if (ApplyReplayRequest(&next)) {
+      created.runtime.reset();
+      std::cerr << "[replay] restarting the session from the in-game menu\n";
+      config = std::move(next);
+      continue;
+    }
   }
 
   // The in-game menu cannot join a session in place -- the lobby runs before
@@ -571,6 +673,8 @@ int RunMain(int argc, char **argv) {
             session_config, std::move(frontend_config), std::move(netplay));
       }
     }
+  }
+  break;
   }
   return 0;
 }

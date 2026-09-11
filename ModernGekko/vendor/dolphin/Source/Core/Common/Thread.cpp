@@ -70,6 +70,7 @@ void SwitchCurrentThread()
 // Sets the debugger-visible name of the current thread.
 // Uses trick documented in:
 // https://docs.microsoft.com/en-us/visualstudio/debugger/how-to-set-a-thread-name-in-native-code
+#ifndef __MINGW32__
 static void SetCurrentThreadNameViaException(const char* name)
 {
   static const DWORD MS_VC_EXCEPTION = 0x406D1388;
@@ -97,6 +98,7 @@ static void SetCurrentThreadNameViaException(const char* name)
   {
   }
 }
+#endif  // !__MINGW32__
 
 static void SetCurrentThreadNameViaApi(const char* name)
 {
@@ -113,7 +115,14 @@ static void SetCurrentThreadNameViaApi(const char* name)
 
 void SetCurrentThreadName(const char* name)
 {
+#ifndef __MINGW32__
+  // The exception trick needs MSVC structured exception handling (__try /
+  // __except), which clang targeting the MinGW ABI does not provide. It is the
+  // legacy of the two methods: it only reaches a debugger that is already
+  // attached at the moment the name is set, and SetThreadDescription below
+  // covers the modern case, including a debugger attached later.
   SetCurrentThreadNameViaException(name);
+#endif
   SetCurrentThreadNameViaApi(name);
 }
 

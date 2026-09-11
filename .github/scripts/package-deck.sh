@@ -256,6 +256,36 @@ case "$floor" in
   *) echo "  FAIL: $floor is above SteamOS's ~2.37 -- this will not start on a Deck" >&2; exit 1 ;;
 esac
 
+# The GPL source offer has to RESOLVE. Every Deck zip through 1.5.2 sent owners
+# to a URL that 404s: first because it named the then-private repository, and
+# then, after that was "fixed", because the replacement named a repository that
+# does not exist (RingOutRecomp, not RingOut). Both shipped. Nothing checked,
+# and a wrong URL is invisible on inspection -- it looks exactly like a right
+# one. An unfulfillable offer is a licence violation, not a typo.
+#
+# Fetched, not compared against a constant: the failure both times was believing
+# a plausible string. The only thing that distinguishes a good URL from a bad
+# one here is whether the far end answers.
+echo "==> GPL source offer"
+offer_url="$(grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' "$STAGE/CREDITS.txt" |
+             grep -iE '/RingOut' | head -1)"
+if [ -z "$offer_url" ]; then
+  echo "  FAIL: CREDITS.txt names no project source URL" >&2; exit 1
+fi
+if [ "${SKIP_URL_CHECK:-0}" = 1 ]; then
+  echo "  $offer_url (not fetched, SKIP_URL_CHECK=1)"
+else
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 20 "$offer_url" 2>/dev/null || echo 000)"
+  case "$code" in
+    200) echo "  $offer_url -> $code" ;;
+    000) echo "  FAIL: could not reach $offer_url. Set SKIP_URL_CHECK=1 to" >&2
+         echo "        package offline, but do NOT publish unverified." >&2; exit 1 ;;
+    *)   echo "  FAIL: $offer_url -> HTTP $code" >&2
+         echo "        The GPL source offer in CREDITS.txt does not resolve." >&2
+         echo "        A player receiving this package cannot get the source." >&2; exit 1 ;;
+  esac
+fi
+
 # The checks above are the copyright axis -- disc, save card, module. Privacy is
 # a separate axis they do not cover: a stage can be entirely free of game data
 # and still carry the builder's home directory baked into a generated file, LAN

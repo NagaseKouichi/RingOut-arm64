@@ -142,6 +142,29 @@ def extract_icon(gci_path, art):
     return written
 
 
+def write_ico(path, png_path, width=32, height=32):
+    """Wrap the 32x32 PNG as a Windows .ico.
+
+    Windows shortcuts want an .ico, and an ICO may carry a PNG verbatim since
+    Vista -- so this is a 22-byte header round the file already written, not a
+    re-encode. That keeps the promise at the top of this file: standard library
+    only, no PIL, no ImageMagick.
+
+    Same rule as everything else here -- this is the PLAYER's artwork, extracted
+    on their machine from their own disc and saves. It does not ship.
+    """
+    with open(png_path, 'rb') as fh:
+        png = fh.read()
+    # ICONDIR: reserved, type 1 (icon), one image.
+    header = struct.pack('<HHH', 0, 1, 1)
+    # ICONDIRENTRY: 32x32, 0 = "not a palette", 1 plane, 32bpp, size, offset.
+    # A dimension of 0 means 256 in this format; nothing here is that large.
+    entry = struct.pack('<BBBBHHII', width % 256, height % 256, 0, 0, 1, 32,
+                        len(png), 6 + 16)
+    with open(path, 'wb') as fh:
+        fh.write(header + entry + png)
+
+
 def find_save(root):
     """First .gci under userdata/. Prefer the real card over NetPlayTemp, whose
     copy is scratch state rather than the player's own save."""
@@ -174,6 +197,19 @@ def main():
             print('    icon:   save found but no icon in it')
     else:
         print('    icon:   no save yet -- rerun after playing once')
+
+    # A Windows .ico for the shortcuts, preferring the memory-card icon and
+    # falling back to the banner -- the same order setup.sh uses for the Linux
+    # desktop entry, so both platforms show the same picture. Harmless on Linux,
+    # which simply ignores the extra file.
+    for src, w, h in (('icon.png', 32, 32), ('banner.png', 96, 32)):
+        path = os.path.join(art, src)
+        if os.path.isfile(path):
+            write_ico(os.path.join(art, 'icon.ico'), path, w, h)
+            print(f'    ico:    art/icon.ico (from {src})')
+            break
+    else:
+        print('    ico:    nothing to build one from')
 
 
 if __name__ == '__main__':

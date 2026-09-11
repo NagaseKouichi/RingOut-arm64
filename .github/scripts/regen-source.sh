@@ -59,8 +59,12 @@ for entry in "${COMPONENTS[@]}"; do
   echo "  $name @ $full"
 
   # Upstream tree at the pinned commit. Deterministic: same commit, same bytes.
-  git -C "$path" archive --format=tar.gz --prefix="$name-$short/" HEAD \
-      > "$DEST/$name-$short.tar.gz"
+  # --worktree-attributes so each tree's .gitattributes applies without being
+  # committed: they carry export-ignore rules that keep Python build output out
+  # of the shipment. A committed .pyc in the Dolphin tree reached every desktop
+  # package with an upstream author's macOS home path inside it.
+  git -C "$path" archive --worktree-attributes --format=tar.gz \
+      --prefix="$name-$short/" HEAD > "$DEST/$name-$short.tar.gz"
 
   # Modifications to tracked files.
   if git -C "$path" diff --quiet; then
@@ -87,9 +91,39 @@ echo "==> privacy check"
 "$REPO/.github/scripts/privacy-scan.sh" "$DEST"
 
 echo
-echo "==> CREDITS.txt must name these archives:"
-printf '%s\n' "${CREDIT_LINES[@]}"
-echo
-echo "current CREDITS.txt names:"
-grep -oE '[A-Za-z-]+-[0-9a-f]{7}\.tar\.gz' "$REPO/dist/RingOut-1.0-dist/CREDITS.txt" |
-  sed 's/^/  /' | sort -u
+echo "==> CREDITS.txt archive names"
+# This USED to print the expected list beside whatever CREDITS.txt named and
+# leave the reader to compare. It could not work: the pattern matched exactly 7
+# hex characters and `git rev-parse --short` here yields 12, so the "current"
+# list was empty every time however correct the file was. And because that grep
+# was the last command, its exit status was the SCRIPT's -- so regen-source.sh
+# reported failure on every successful run, which is the same thing as
+# reporting nothing.
+#
+# Compare instead of printing, and say which side is wrong.
+missing=0
+for line in "${CREDIT_LINES[@]}"; do
+  archive="${line##* }"
+  if grep -qF "$archive" "$REPO/dist/RingOut-1.0-dist/CREDITS.txt"; then
+    echo "  ok      $archive"
+  else
+    echo "  MISSING $archive" >&2
+    missing=1
+  fi
+done
+# The reverse direction matters just as much: an archive named in CREDITS that
+# regen no longer produces is a GPL offer pointing at a file that is not there.
+while read -r stale; do
+  case " ${CREDIT_LINES[*]} " in
+    *" $stale "*) ;;
+    *) echo "  STALE   $stale (named in CREDITS.txt, not produced)" >&2; missing=1 ;;
+  esac
+done < <(grep -oE '[A-Za-z-]+-[0-9a-f]{7,40}\.tar\.gz' \
+           "$REPO/dist/RingOut-1.0-dist/CREDITS.txt" | sort -u)
+
+if [ "$missing" != 0 ]; then
+  echo >&2
+  echo "CREDITS.txt does not match the shipment -- update it before packaging." >&2
+  exit 1
+fi
+echo "  CREDITS.txt matches the shipment"

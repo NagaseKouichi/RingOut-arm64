@@ -577,10 +577,19 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
     return;
   }
 
-  if (cpu_info.HTT)
-    Config::SetBaseOrCurrent(Config::MAIN_DSP_THREAD, cpu_info.num_cores > 4);
-  else
-    Config::SetBaseOrCurrent(Config::MAIN_DSP_THREAD, cpu_info.num_cores > 2);
+  // Upstream derived MAIN_DSP_THREAD from the host CPU here:
+  //
+  //   if (cpu_info.HTT) SetBaseOrCurrent(MAIN_DSP_THREAD, num_cores > 4);
+  //   else              SetBaseOrCurrent(MAIN_DSP_THREAD, num_cores > 2);
+  //
+  // That makes an EMULATION setting depend on the machine it runs on, and it
+  // overwrote whatever the configuration asked for. Netplay does not sync this
+  // one -- NetPlayServer sends dsp_hle and dsp_enable_jit and nothing else --
+  // so a 16-core desktop and a 4-core laptop would boot the same session with
+  // different DSP emulation and no warning anywhere.
+  //
+  // The configured value now stands. It is set explicitly in
+  // DolphinRuntime::ApplyConfiguration, so it is identical on every machine.
 
   if (!system.GetDSP().GetDSPEmulator()->Initialize(system.IsWii(),
                                                     Config::Get(Config::MAIN_DSP_THREAD)))

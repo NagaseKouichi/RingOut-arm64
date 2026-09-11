@@ -71,6 +71,11 @@
 # native build trees from setup.sh / a local dolrecomp build, same placement
 # reason as the container ones above.
 /build-dist-native/
+# The Windows cross-build tree. Added 2026-09-11 after `git add -A` committed
+# 4429 of its files, including a CMake log carrying the builder's home path --
+# every other build-* directory here was already ignored, this one was new and
+# nobody had named it yet.
+/build-win/
 /build-dolrecomp-static/
 /build-dolrecomp/
 # root-level ccache/CMake cache written by those trees -- 700 MB+ and never
@@ -148,4 +153,9 @@ compile_commands.json
 # Deck-targeted module build tree (clang + PGO + -march=znver2), like /build-dolrecomp/
 /build-module-deck/
 /build-module-aug12/
+
+# Python build output. A committed .pyc carried an upstream author's macOS
+# home path into the GPL source tarball that ships in the desktop package, and
+# the privacy scan could not see it because it was inside a .tar.gz.
 __pycache__/
+*.pyc

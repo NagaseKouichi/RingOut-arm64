@@ -12,6 +12,10 @@
 #pragma once
 
 #include <functional>
+#include <string>
+
+// ImGui's own type, declared here so this header does not pull in imgui.h.
+struct ImFont;
 
 namespace RecompMenu
 {
@@ -22,6 +26,9 @@ enum class Key
   Left,
   Right,
   Activate,
+  // Delete key, or X on a pad. Only the SHOTS grid listens for it, and only as
+  // the second half of an arm-then-confirm pair.
+  Delete,
 };
 
 bool IsOpen();
@@ -45,6 +52,15 @@ void Draw();
 // the RECOMP_MENU_AUTOOPEN debug aid.
 void HostTick();
 
+// Frees the menu's backend textures. Called from OnScreenUI's destructor, on
+// the video thread, while the graphics API is still alive.
+void ReleaseGraphics();
+
+// The heavier instance of the OSD font, built alongside the normal one by
+// OnScreenUI. Null until then, and null again once the atlas is torn down --
+// the menu falls back to the normal weight rather than dereferencing it.
+void SetBoldFont(ImFont* font);
+
 // Forces a redraw while emulation is paused. Safe only while the menu is open
 // (the video thread is idle then). No-op otherwise.
 void PumpFrame();
@@ -62,4 +78,8 @@ void SetFastForward(bool enable);
 // worker) for the core to reach Running and loads it. Call once after a
 // successful boot. The save half lives in the menu's Quit action.
 void ScheduleAutoResumeLoad();
+
+// The file this session is recording to or playing back, so the REPLAYS tab can
+// name it. The movie system knows the mode but never the filename.
+void SetActiveReplay(std::string name);
 }  // namespace RecompMenu

@@ -72,7 +72,7 @@ The GPL requires that anyone receiving these binaries can get the matching
 source. Everything in bin/ here is prebuilt, so that applies to this whole
 package. The complete corresponding source is the project repository:
 
-  https://github.com/jackpoison-prog/RingOutRecomp
+  https://github.com/jackpoison-prog/RingOut
 
 It carries the full ModernGekko and Dolphin trees as plain files, with
 every modification made here already in them, so the tagged commit these

@@ -14,3 +14,12 @@
 *.rpx binary
 *.rpl binary
 *.wad binary
+
+# Python build output must never reach the GPL source shipment. A committed
+# pixel_diff.cpython-310.pyc carried an upstream author's macOS home path into
+# the tarball that ships in the desktop package. export-ignore keeps it out of
+# `git archive` without rewriting history or folding this tree's local
+# modifications -- which ship separately as a patch -- into HEAD.
+# regen-source.sh passes --worktree-attributes so this file applies uncommitted.
+**/__pycache__/** export-ignore
+*.pyc export-ignore

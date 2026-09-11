@@ -36,13 +36,19 @@ runtime's own shutdown line has always contradicted.
 Rendering is Vulkan on the GPU, with the CPU emulation and the runtime on
 separate cores.
 
-**Steam Deck**: supported, with its own package — no toolchain needed, since the
-module is built on a desktop and copied over. Runs in both Desktop and Game Mode
-at 45–49 fps in a match. It can also build *on the device*: install a toolchain
-and SteamOS compiles its own module, needing no bundled libraries at all —
-tested end to end on SteamOS 3.8.25, and the way to get the full PGO win there
-(clang 20 cannot read the shipped profiles). See
-[`dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md`](dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md).
+**Steam Deck**: supported, with its own package, and it runs in both Desktop and
+Game Mode at 45–49 fps in a match. Two ways to get a module onto it, so it works
+whether or not the Deck is the only machine you have:
+
+- **Build it on the Deck.** Install a toolchain once and SteamOS compiles its own
+  module, needing no bundled libraries at all — no second computer anywhere in
+  the process. Tested end to end on SteamOS 3.8.25. This is also the way to get
+  the full PGO win there, since clang 20 cannot read the shipped profiles.
+- **Build it on a desktop and copy it over.** No toolchain on the Deck at all, if
+  you have another Linux machine to hand.
+
+[`dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md`](dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md)
+walks through the first route, and ships inside the Deck package too.
 
 **Netplay**: working. Rollback over a deterministic dual-core setup, with a lobby
 showing live ping and per-player game status; two peers stayed byte-identical
@@ -52,15 +58,19 @@ over 6,470 frames.
 
 ## Getting it
 
-Two packages, from the [Releases](../../releases) page:
+Two packages, from the [Releases](../../releases) page. Both are named for the
+release you download, so `<version>` below is `1.5.2` on the current one:
 
 | | for | needs a toolchain? |
 | --- | --- | --- |
-| `RingOut-1.4-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
-| `RingOut-1.4-steamdeck-x86_64.zip` | Steam Deck / SteamOS | only to build a module |
+| `RingOut-<version>-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
+| `RingOut-<version>-steamdeck-x86_64.zip` | Steam Deck / SteamOS | only to build a module |
 
-The Deck package ships no module: build one on a desktop with the package below,
-then copy `game/` and `bin/gGRSEAF_recomp.so` across. Add `RingOut` to Steam as a
+The Deck package ships no module, so you build one and copy `game/` and
+`bin/gGRSEAF_recomp.so` into it. You can do that **on the Deck itself** — download
+both zips, since the Linux one is what carries `module-src/` and does the
+building — or on a desktop if you have one. `setup.sh --deck` installs the result
+into the Deck package for you when it can see it. Add `RingOut` to Steam as a
 non-Steam game to launch it from Game Mode.
 
 For desktop, unzip and run:
@@ -141,6 +151,20 @@ packaging now fails if the two disagree.)
 - **In-game overlay**: pause menu with staged settings and Reset Game; Video, Audio,
   System, Controls, Cheats and Mods tabs
 - **Full controller remapping**
+- **Match replays** — a **REPLAYS** tab in the pause menu: Start Recording, or
+  pick a saved replay to play it back, with **Enter**. A blinking `REC` sits in
+  the corner while a recording is running, and Stop Recording writes the file
+  without interrupting the session. Recordings land in
+  `userdata/Replays/`, named for when they were taken. `--record <file.dtm>` and
+  `--replay <file.dtm>` do the same from the command line. It is a recording of the inputs, not a video: a
+  few tens of kilobytes for a whole match, and it re-runs on the real emulator.
+  This works here because the core is deterministic — a recorded session and its
+  replay were compared frame by frame over 7,000 frames of a real fight and the
+  guest's memory was identical on every one. Replays are portable: one recorded
+  on a desktop plays back identically on a Steam Deck, with a differently built
+  module. They do depend on **your save data**, though — the game's own saved
+  settings are part of what a replay re-runs, so a replay from someone whose
+  save differs may not reproduce their match
 - **Save states** — `Shift+F1`–`F8` to save, `F1`–`F8` to load
 - **Free camera** — fly the camera anywhere in a match
 - **FMV playback** via FFmpeg, replacing the software Sofdec decoder
@@ -308,11 +332,12 @@ fork has measured and rejected, but not all of it.
   distro. A build made natively on SteamOS instead has a 2.38 floor and will not
   run on older SteamOS releases — so the container build stays the shipped one.
 - **There is no Windows build yet.** Linux and the Steam Deck are the supported
-  targets today: there is no Windows CI job and no Windows package, so nothing on
-  the Releases page will run there. A Windows version is coming — the workflow,
-  packaging script, installer and launcher scaffolding all still exist under
-  `attic/windows/`, so it is a revival rather than a fresh start, but it is
-  currently unbuilt and untested and has no date.
+  targets today, and nothing on the Releases page will run on Windows. Work on it
+  has started rather than merely being planned: the first-party Win32 code paths
+  are back, and the workflow, packaging script, installer and launcher are in
+  their live locations again — but the CI job has not been run since, nothing has
+  been built or tested, and there is no date. Anything added since 2026-08-17 has
+  never had a Windows path at all.
 - The `-march=native` build is machine-specific by design; setup compiles on your
   own machine. It matters in exactly one place: the Deck package ships no module
   and sends you here to build one, and a module built on a Zen 4/5 or recent

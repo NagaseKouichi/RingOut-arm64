@@ -101,13 +101,30 @@ if(WIN32)
     ControllerInterface/DInput/XInputFilter.h
     ControllerInterface/Win32/Win32.cpp
     ControllerInterface/Win32/Win32.h
-    ControllerInterface/WGInput/WGInput.cpp
-    ControllerInterface/WGInput/WGInput.h
     ControllerInterface/XInput/XInput.cpp
     ControllerInterface/XInput/XInput.h
     ControllerInterface/ForceFeedback/ForceFeedbackDevice.cpp
     ControllerInterface/ForceFeedback/ForceFeedbackDevice.h
   )
+
+  # Windows.Gaming.Input is C++/WinRT to its core -- unlike HRWrap there is no
+  # small shim that replaces it -- and WinRT ships with Visual Studio, not
+  # MinGW. DInput and XInput both still build here, and SDL is this project's
+  # actual controller path, so a MinGW build loses none of the pads that
+  # matter; WGInput mainly adds newer Xbox devices that XInput already covers.
+  if(MSVC)
+    target_sources(inputcommon PRIVATE
+      ControllerInterface/WGInput/WGInput.cpp
+      ControllerInterface/WGInput/WGInput.h
+    )
+    target_compile_definitions(inputcommon PRIVATE HAVE_WGINPUT)
+    # WinRT's umbrella import libraries, wanted only by WGInput.
+    target_link_libraries(inputcommon PRIVATE windowsapp)
+  endif()
+
+  # DirectInput asks for these with `#pragma comment(lib, ...)`, an MSVC linker
+  # directive MinGW ignores. Named here so both toolchains resolve them.
+  target_link_libraries(inputcommon PRIVATE dinput8 dxguid ole32 hid)
 elseif(APPLE)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Quartz/Quartz.h

@@ -7,7 +7,11 @@
 #include <string.h>
 #include <math.h>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
 #include <stdatomic.h>
+#endif
 
 // glibc 2.38 added a new symbol version for fmod, and the linker binds whatever
 // the BUILD host has. That silently sets this module's glibc floor to 2.38 on
@@ -73,7 +77,21 @@ static void* g_gp_user = NULL;
 // than silently dropping entries from the journal.
 static const unsigned char* g_gp_bypass = NULL;
 
-__attribute__((visibility("default"))) void ppc_set_gather_pipe(u8** cursor, u8* const* base,
+// Exported for the host runtime to find with GetSymbolAddress. The GCC
+// visibility attribute alone is ELF-only: on a PE target it is silently
+// ignored, so a Windows module built with just that exports NOTHING and the
+// runtime degrades quietly -- gather-pipe stores fall back to the slower
+// external-write hook (worth ~5%) and the determinism watch turns itself off.
+// Neither prints anything a player would see as a fault.
+#if defined(_WIN32)
+#define PPC_MODULE_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define PPC_MODULE_EXPORT __attribute__((visibility("default")))
+#else
+#define PPC_MODULE_EXPORT
+#endif
+
+PPC_MODULE_EXPORT void ppc_set_gather_pipe(u8** cursor, u8* const* base,
                                                                 PPCGatherPipeFlush flush,
                                                                 void* user,
                                                                 const unsigned char* bypass) {
@@ -126,7 +144,7 @@ static inline int gather_pipe_store(u32 addr, u64 value, u32 size) {
 typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);
 PPCMemWriteJournal g_mem_write_journal = NULL;
 void* g_mem_write_journal_user = NULL;
-__attribute__((visibility("default"))) void ppc_set_mem_write_journal(PPCMemWriteJournal fn,
+PPC_MODULE_EXPORT void ppc_set_mem_write_journal(PPCMemWriteJournal fn,
                                                                       void* user) {
     g_mem_write_journal = fn;
     g_mem_write_journal_user = user;
@@ -1342,7 +1360,15 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
 }
 
 void ppc_memory_fence(void) {
+#if defined(_MSC_VER)
+    _ReadWriteBarrier();
+#if defined(_M_IX86) || defined(_M_X64)
+    _mm_mfence();
+#endif
+    _ReadWriteBarrier();
+#else
     atomic_thread_fence(memory_order_seq_cst);
+#endif
 }
 
 static f64 round_nearest_even(f64 value) {

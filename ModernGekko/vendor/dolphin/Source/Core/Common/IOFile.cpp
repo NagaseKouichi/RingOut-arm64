@@ -8,6 +8,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <share.h>  // SH_DENYWR; MSVC's headers pull this in, MinGW's do not
 
 #include "Common/CommonFuncs.h"
 #include "Common/StringUtil.h"

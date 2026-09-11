@@ -310,13 +310,26 @@ endif()
 
 if(WIN32)
   target_sources(common PRIVATE
-    CompatPatches.cpp
     GL/GLInterface/WGL.cpp
     GL/GLInterface/WGL.h
-    WindowsDevice.cpp
-    WindowsDevice.h
     WindowsRegistry.cpp
   )
+  target_sources(common PRIVATE
+    WindowsDevice.cpp
+    WindowsDevice.h
+  )
+  # Bare names, not cfgmgr32.lib: MSVC appends .lib itself, and MinGW wants
+  # -lcfgmgr32 against libcfgmgr32.a. Both are present in the MinGW sysroot --
+  # an earlier revision of this file excluded them on the mistaken belief that
+  # they were not.
+  target_link_libraries(common PRIVATE cfgmgr32 qwave)
+  if(MSVC)
+    # Patches MSVC's CRT initialisation table using link.exe-specific
+    # directives. Not required here, and does not compile with MinGW.
+    target_sources(common PRIVATE
+      CompatPatches.cpp
+    )
+  endif()
 elseif(APPLE)
   target_sources(common PRIVATE
     GL/GLInterface/AGL.h
@@ -338,6 +351,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(common PUBLIC dl rt)
 endif()
 
+# Back to WIN32: HRWrap has a MinGW implementation now (FormatMessageW instead
+# of C++/WinRT), so it builds for every Windows target again.
 if(WIN32)
   target_sources(common PRIVATE HRWrap.h HRWrap.cpp)
 else()
@@ -377,7 +392,11 @@ if(UNIX)
   if(SYSTEMD_FOUND)
     target_link_libraries(traversal_server PRIVATE ${SYSTEMD_LIBRARIES})
   endif()
-elseif(WIN32)
+elseif(MSVC)
+  # PowerShell is used here only to query Visual Studio's redistributable
+  # version, and the force-include below is link.exe syntax. A MinGW
+  # cross-build has neither Visual Studio nor Windows PowerShell, so treating
+  # every WIN32 toolchain as MSVC makes configuration fail on Linux.
   find_package(PowerShell REQUIRED)
   execute_process(
     COMMAND ${POWERSHELL_EXE} -Command "[System.Diagnostics.FileVersionInfo]::GetVersionInfo('$ENV{VCToolsRedistDir}vc_redist.x64.exe').ProductVersion"

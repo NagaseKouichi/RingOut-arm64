@@ -34,6 +34,7 @@
 #include <commdlg.h>  // for GetSaveFileName
 #include <direct.h>   // getcwd
 #include <io.h>
+#include <share.h>  // _SH_DENYNO; MSVC's headers pull this in, MinGW's do not
 #include <objbase.h>  // guid stuff
 #include <shellapi.h>
 #else

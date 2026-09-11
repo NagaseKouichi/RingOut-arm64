@@ -198,6 +198,10 @@ void StaticRecompCore::Init()
     // runtime does not use -- so without this, every fastmem miss inside JIT code
     // is a fatal segfault in anonymous executable memory, with no symbols and a
     // broken frame chain. Whoever constructs the JIT owes it its handler.
+    // Core::EmuThread installs the same handler for its own JIT, and both paths
+    // can be live at once, so these calls are reference-counted inside EMM --
+    // see MemTools.cpp. Installing unconditionally here is correct and stays
+    // correct if a third owner ever appears.
     if (EMM::IsExceptionHandlerSupported())
       EMM::InstallExceptionHandler();
     m_fallback_jit->Init();
