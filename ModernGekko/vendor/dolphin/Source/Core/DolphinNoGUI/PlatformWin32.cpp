@@ -3,9 +3,11 @@
 
 #include "DolphinNoGUI/Platform.h"
 
+#include "Common/Config/Config.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/State.h"
 #include "Core/System.h"
 
@@ -71,7 +73,10 @@ bool PlatformWin32::RegisterRenderWindowClass()
   wc.hInstance = GetModuleHandle(nullptr);
   wc.hIcon = LoadIcon(nullptr, IDI_ICON1);
   wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-  wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  // Black, not COLOR_WINDOW (white): any part of the window the swapchain has
+  // not covered yet -- mid-resize, or entering fullscreen -- shows this brush,
+  // and a white flash round a game picture is what RingOut#10 reported.
+  wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
   wc.lpszMenuName = nullptr;
   wc.lpszClassName = WINDOW_CLASS_NAME;
   wc.hIconSm = LoadIcon(nullptr, IDI_ICON1);
@@ -122,6 +127,17 @@ void PlatformWin32::ToggleFullscreen()
 {
   const LONG_PTR style = GetWindowLongPtr(m_hwnd, GWL_STYLE);
 
+  // THE WHITE BORDER (RingOut#10). The window is created with WS_EX_CLIENTEDGE,
+  // an EXTENDED style that draws a sunken 3D edge round the client area. Only
+  // GWL_STYLE was being stripped, so that edge -- light-coloured, and backed by
+  // the class's white background brush -- stayed drawn round the picture in
+  // "borderless" fullscreen. Strip the edge-drawing extended styles too, and put
+  // back exactly what the window had when leaving.
+  constexpr LONG_PTR kEdgeExStyles =
+      WS_EX_CLIENTEDGE | WS_EX_WINDOWEDGE | WS_EX_STATICEDGE | WS_EX_DLGMODALFRAME;
+  static LONG_PTR s_saved_ex_style = WS_EX_CLIENTEDGE;
+  const LONG_PTR ex_style = GetWindowLongPtr(m_hwnd, GWL_EXSTYLE);
+
   if (!m_window_fullscreen)
   {
     MONITORINFO mi = {sizeof(MONITORINFO)};
@@ -131,7 +147,9 @@ void PlatformWin32::ToggleFullscreen()
       return;
     }
     m_saved_style = style;
+    s_saved_ex_style = ex_style;
     SetWindowLongPtr(m_hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+    SetWindowLongPtr(m_hwnd, GWL_EXSTYLE, ex_style & ~kEdgeExStyles);
     SetWindowPos(m_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                  mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
@@ -140,6 +158,7 @@ void PlatformWin32::ToggleFullscreen()
   else
   {
     SetWindowLongPtr(m_hwnd, GWL_STYLE, m_saved_style ? m_saved_style : (style | WS_OVERLAPPEDWINDOW));
+    SetWindowLongPtr(m_hwnd, GWL_EXSTYLE, s_saved_ex_style);
     SetWindowPlacement(m_hwnd, &m_saved_placement);
     SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
@@ -345,6 +364,13 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
     {
       platform->ToggleFullscreen();
     }
+    // Alt+W toggles 16:9, as on X11 and Wayland. It arrives as WM_SYSKEYDOWN
+    // (Alt is held), which is why it is also in the return-0 list below.
+    else if (wParam == 'W' && alt)
+    {
+      if (RecompWidescreen::Toggle())
+        Config::Save();
+    }
     // The save-state and screenshot keys, mirroring PlatformX11. This platform
     // was written after they were, and shipping it alongside the gallery is
     // what made their absence matter: F9 is the only way to put a picture in
@@ -381,7 +407,8 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
     // Returning 0 for a handled WM_SYSKEYDOWN stops DefWindowProc treating it
     // as menu activation, which otherwise beeps and eats the keystroke.
     if (msg == WM_SYSKEYDOWN && (wParam == VK_F10 || (wParam == VK_RETURN && alt) ||
-                                 wParam == VK_ESCAPE || wParam == VK_TAB))
+                                 (wParam == 'W' && alt) || wParam == VK_ESCAPE ||
+                                 wParam == VK_TAB))
     {
       return 0;
     }

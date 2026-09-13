@@ -505,7 +505,27 @@ void OnScreenUI::Finalize()
 
   // Bottom-left: the performance stats own the top-right, and the pause menu is
   // centred, so this corner is free and never overlaps either.
+  //
+  // Shown for a few seconds at launch and whenever the pause menu is open --
+  // not all the time. A player reported it as a defect sitting in the corner of
+  // every fullscreen frame (RingOut#10). Launch and the menu are exactly when a
+  // stale install needs spotting, so it keeps its job without living on top of
+  // the game. The clock is process-wide: an in-place session restart does not
+  // bring the launch window back, but opening the menu still does.
+  constexpr float kStampVisibleSeconds = 6.0f;
+  constexpr float kStampFadeSeconds = 1.0f;
+  static const auto s_stamp_start = std::chrono::steady_clock::now();
+  const float stamp_age =
+      std::chrono::duration<float>(std::chrono::steady_clock::now() - s_stamp_start).count();
+  float stamp_alpha = 0.0f;
+  if (RecompMenu::IsOpen() || stamp_age < kStampVisibleSeconds)
+    stamp_alpha = 1.0f;
+  else if (stamp_age < kStampVisibleSeconds + kStampFadeSeconds)
+    stamp_alpha = 1.0f - (stamp_age - kStampVisibleSeconds) / kStampFadeSeconds;
+
+  if (stamp_alpha > 0.0f)
   {
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, stamp_alpha);
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 6.0f * m_backbuffer_scale,
                                    viewport->WorkPos.y + viewport->WorkSize.y -
@@ -521,6 +541,7 @@ void OnScreenUI::Finalize()
       ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", BuildStamp().c_str());
     }
     ImGui::End();
+    ImGui::PopStyleVar();
   }
 
   ImGui::Render();

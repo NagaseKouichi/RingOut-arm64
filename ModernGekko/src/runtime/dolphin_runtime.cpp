@@ -519,12 +519,12 @@ void ApplyGraphicsSettings(const GraphicsSettings &graphics, bool headless) {
     Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
   if (graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE, *graphics.internal_resolution_scale);
-  // SoulCalibur II and most GC titles render a 4:3 projection. ForceWide alone
-  // would just stretch that image; the widescreen hack widens the projection
-  // matrix so the extra horizontal field of view is actually drawn. The pair is
-  // set together — either both on (16:9) or both off (native 4:3). Alt+W flips
-  // them at runtime via Config::SetCurrent (VideoConfig::Refresh picks it up on
-  // the next frame).
+  // --widescreen still sets the widescreen hack + ForceWide pair, which is what
+  // discs without a mapped 16:9 mode get. The US, JP, PAL and SC2 Plus discs have their
+  // OWN 16:9 mode, and the hack distorts their 2D screens (RingOut#10):
+  // RecompWidescreen migrates the hack to that mode on the first frame, so this
+  // flag means "widescreen" for every disc. Alt+W and the VIDEO row go through
+  // RecompWidescreen::Toggle.
   // Only forced when --widescreen is passed; otherwise the value saved by the
   // in-game menu (Alt+W / Settings) carries over between launches.
   if (graphics.widescreen) {

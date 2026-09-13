@@ -43,6 +43,7 @@
 #include "Core/Config/CheatSettings.h"
 #include "Core/Config/ConfigManager.h"
 #include "Core/Movie.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/Config/FreeLookSettings.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
@@ -1307,7 +1308,7 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     // session has to be built from boot.
     return netplay_mode == 0 ? "-" : "RESTARTS GAME";
   case Item::Widescreen:
-    return Config::Get(Config::GFX_WIDESCREEN_HACK) ? "ON" : "OFF";
+    return RecompWidescreen::IsEnabled() ? "ON" : "OFF";
   case Item::InternalRes:
   {
     // A bare "3x" says nothing about what it costs. The EFB is 640x528, so
@@ -1641,12 +1642,11 @@ void ApplyCheatCodes(const std::vector<ActionReplay::ARCode>& ar_codes,
   Gecko::SetActiveCodes(gecko_codes, game_id, revision);
 }
 
-// Widescreen needs the projection widened, not the 4:3 image stretched, so the
-// hack and the aspect mode are always flipped together (same pairing as Alt+W).
-void SetWidescreen(bool enable)
+// The US disc uses the game's own 16:9 mode; anything else keeps the hack. The
+// decision, and why, lives in RecompWidescreen (same path as Alt+W).
+void ToggleWidescreen()
 {
-  Config::SetBase(Config::GFX_WIDESCREEN_HACK, enable);
-  Config::SetBase(Config::GFX_ASPECT_RATIO, enable ? AspectMode::ForceWide : AspectMode::Auto);
+  RecompWidescreen::Toggle();
 }
 
 // Returns true if a Config value changed and needs flushing. The flush itself
@@ -1709,7 +1709,7 @@ bool AdjustItem(Item item, int direction, State& state)
   case Item::NetplayStart:
     break;   // an action, not a value
   case Item::Widescreen:
-    SetWidescreen(!Config::Get(Config::GFX_WIDESCREEN_HACK));
+    ToggleWidescreen();
     break;
   case Item::InternalRes:
   {

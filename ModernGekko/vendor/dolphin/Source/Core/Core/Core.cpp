@@ -67,6 +67,7 @@
 #include "Core/NetPlay/NetPlayClient.h"
 #include "Core/NetPlay/NetPlayProto.h"
 #include "Core/RecompDeterminism.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/Cheats/PatchEngine.h"
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
@@ -141,6 +142,9 @@ void FrameUpdateOnCPUThread()
   // On the CPU thread and once per emulated frame, which is the only place a
   // state hash is comparable between two runs.
   RecompDeterminism::OnFrame(Core::System::GetInstance());
+
+  // Same thread and cadence, for the same reason: it reads and writes guest RAM.
+  RecompWidescreen::OnFrame(Core::System::GetInstance());
 }
 
 void OnFrameEnd(Core::System& system)

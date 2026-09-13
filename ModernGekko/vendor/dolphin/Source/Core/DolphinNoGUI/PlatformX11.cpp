@@ -15,6 +15,7 @@ static constexpr auto X_None = None;
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/State.h"
 #include "Core/System.h"
 
@@ -286,11 +287,8 @@ void PlatformX11::ProcessEvents()
       else if ((key == XK_w || key == XK_W) && (event.xkey.state & Mod1Mask))
       {
         // Toggle 16:9 — see the matching handler in PlatformWayland.cpp.
-        const bool enable = !Config::Get(Config::GFX_WIDESCREEN_HACK);
-        Config::SetBase(Config::GFX_WIDESCREEN_HACK, enable);
-        Config::SetBase(Config::GFX_ASPECT_RATIO,
-                        enable ? AspectMode::ForceWide : AspectMode::Auto);
-        Config::Save();
+        if (RecompWidescreen::Toggle())
+          Config::Save();
       }
       else if (key >= XK_F1 && key <= XK_F8)
       {

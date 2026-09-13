@@ -29,6 +29,7 @@
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "UICommon/UICommon.h"
@@ -721,15 +722,11 @@ void PlatformWayland::HandleHotkey(xkb_keysym_t symbol)
   }
   else if ((symbol == XKB_KEY_w || symbol == XKB_KEY_W) && ModifierActive(XKB_MOD_NAME_ALT))
   {
-    // Toggle 16:9. The widescreen hack widens the projection matrix so the extra
-    // field of view is rendered; ForceWide alone would only stretch the 4:3
-    // image, so the two are flipped together. SetCurrent (not SetBase) keeps
-    // this a session-local override, and VideoConfig::Refresh applies it on the
-    // next frame via the config-changed callback.
-    const bool enable = !Config::Get(Config::GFX_WIDESCREEN_HACK);
-    Config::SetBase(Config::GFX_WIDESCREEN_HACK, enable);
-    Config::SetBase(Config::GFX_ASPECT_RATIO, enable ? AspectMode::ForceWide : AspectMode::Auto);
-    Config::Save();
+    // Toggle 16:9. On a mapped disc (US, JP, PAL, SC2 Plus) this switches the game's own
+    // 16:9 mode; the widescreen hack it used to flip is what distorted character
+    // select (RingOut#10). Other discs keep the hack. See RecompWidescreen.h.
+    if (RecompWidescreen::Toggle())
+      Config::Save();
   }
   else if (symbol >= XKB_KEY_F1 && symbol <= XKB_KEY_F8)
   {
