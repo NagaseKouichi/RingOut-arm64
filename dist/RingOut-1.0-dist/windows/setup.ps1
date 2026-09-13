@@ -176,7 +176,15 @@ if (Test-Path -LiteralPath $Work) { Remove-Item -Recurse -Force -LiteralPath $Wo
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 $jobs = [Environment]::ProcessorCount
-& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') "-j$jobs" (Join-Path $Work 'out')
+# --idle-pc is NOT optional, and this script omitted it until 1.6.1 (RingOut#12).
+# Loop back-edges compile to native gotos, which is where much of the speed comes
+# from -- but the game's idle spin loop must stay a dispatcher return, or the
+# host never sees the game idling and idle-skip silently stops working. Without
+# the flag the recompiler does NOT detect it: the loop becomes a native goto and
+# the CPU thread spins at full load, which is exactly "one core pegged, well
+# under 60". "auto" finds the loop in THIS disc (0x80185DEC US, 0x8017F35C JP,
+# 0x8018D544 PAL) and prints it; setup.sh has passed it since 2026-08-25.
+& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto "-j$jobs" (Join-Path $Work 'out')
 if ($LASTEXITCODE -ne 0) { Die "Recompilation failed." }
 
 # gen_module_tables.py reads main.dol from alongside the generated sources.
@@ -202,12 +210,40 @@ if ($future.Count -gt 0) {
 }
 
 Write-Host "==> 3/3  Building the module"
+# PROFILE-GUIDED BUILD, PICKED BY DISC ID -- the same choice setup.sh makes, and
+# another thing this script never did until 1.6.1 (RingOut#12). The profiles and
+# llvm-profdata have shipped in this package all along; nothing passed them in,
+# and the module's CMake builds unprofiled unless MODULE_PGO_PROFILE is set.
+# Worth 10-14% of CPU time on a real match.
+#
+# A profile only fits the disc it was trained on (chunk functions are named by
+# guest address), and a MISMATCHED one is worse than none -- so this disc's
+# profile or nothing. SC2 Plus hooks the US executable in place, so its chunks
+# are the US disc's and it takes the US profile. The CMakeLists still probes the
+# file with this clang and builds normally if it cannot use it.
+# Not $Profile: PowerShell variables are case-insensitive, and $PROFILE is an
+# automatic variable holding the user's profile-script path.
+$Profiles = Join-Path $Here 'module-src\profiles'
+$PgoProfile = Join-Path $Profiles "$DiscId.profdata"
+if (-not (Test-Path -LiteralPath $PgoProfile) -and $DiscId -eq 'GRSEPS') {
+    $PgoProfile = Join-Path $Profiles 'GRSEAF.profdata'
+}
+$PgoArgs = @()
+if (Test-Path -LiteralPath $PgoProfile) {
+    $PgoArgs = @("-DMODULE_PGO_PROFILE=$PgoProfile")
+    Write-Host "    profile-guided build for $DiscId (this takes longer, and is worth it)"
+} else {
+    Write-Host "    no profile ships for $DiscId, so this builds without one."
+    Write-Host "    Your module is correct; a profiled build is 10-14% faster."
+}
+
 & $Cmake -S (Join-Path $Here 'module-src') -B (Join-Path $Work 'build') -GNinja `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
     -DCMAKE_BUILD_TYPE=Release `
     "-DCMAKE_C_COMPILER=$Clang" `
     "-DPython3_EXECUTABLE=$Python" `
     -DCMAKE_C_FLAGS="-march=native" `
+    @PgoArgs `
     "-DGAME_ID=$DiscId" `
     "-DGENERATED_DIR=$(Join-Path $Work 'out\generated')" `
     "-DDOLRECOMP_SRC=$(Join-Path $Deps 'dolrecomp-src')" `
