@@ -290,7 +290,7 @@ survives — it is just a file.
 | `./bin/moderngekko-run --extract <disc> ./game` | extract formats the recompiler cannot read (`.rvz`, `.gcz`, `.wia`) |
 | `./RingOut` | launch the game |
 | `./bin/moderngekko-run --headless ...` | verify without a display |
-| `./tools/dolrecomp --gamecube <dol> --idle-pc auto -jN <out>` | the recompile step alone, if you want to run it by hand |
+| `./tools/dolrecomp --gamecube <dol> --idle-pc auto -jN <out>` | the recompile step alone, if you want to run it by hand (US disc only: add `--leader-cases`, which its profile is trained with) |
 
 ## Notes
 

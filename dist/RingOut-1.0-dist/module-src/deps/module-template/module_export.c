@@ -77,3 +77,14 @@ RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
 {
     return &s_desc;
 }
+
+/* Guest-timing class of this module, read by the chassis for replay
+   compatibility: 2 when it was generated with --direct-calls (cross-chunk calls
+   stay native, so the dispatcher's per-dispatch timing work runs less often and
+   guest timing differs), 1 otherwise. A replay recorded under one class does
+   not reproduce under the other. Headers generated without the flag do not
+   define it. */
+#ifndef DOLRECOMP_TIMING_ID
+#define DOLRECOMP_TIMING_ID 1u
+#endif
+RECOMP_MODULE_EXPORT const u32 staticrecomp_timing_id = DOLRECOMP_TIMING_ID;

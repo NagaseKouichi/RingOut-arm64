@@ -72,6 +72,14 @@ public:
   void RebuildFastEntryChunk(u32 chunk_index);
   bool IsModuleEntry(u32 address) const;
 
+  // The loaded module's guest-timing class (its optional staticrecomp_timing_id
+  // export): 1 = cross-chunk calls return through this dispatcher, 2 = the
+  // module calls across chunks natively (--direct-calls), which changes guest
+  // timing. A replay recorded under one class does not reproduce under the
+  // other. 0 = no module loaded.
+  u32 TimingId() const { return m_module ? m_timing_id : 0u; }
+  u32 m_timing_id = 1;
+
   void ClearCache() override;
   void Jit(u32 em_address) override {}
   bool HandleFault(uintptr_t access_address, SContext* ctx) override { return false; }

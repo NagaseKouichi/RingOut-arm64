@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Configure
         # Dolphin's own CMake drives the vendored tree. Qt and the tests are the

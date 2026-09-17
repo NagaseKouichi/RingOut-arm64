@@ -420,6 +420,12 @@ void StaticRecompCore::LoadModule()
 
   m_module = desc;
   m_module_active = (desc != nullptr);
+  {
+    // Optional export; a module built before it existed has dispatcher timing.
+    const auto* timing =
+        static_cast<const u32*>(m_library.GetSymbolAddress("staticrecomp_timing_id"));
+    m_timing_id = timing ? *timing : 1u;
+  }
   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
   m_failed_chunks = 0;
   m_lookup_ram_size = 0;

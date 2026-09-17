@@ -156,7 +156,9 @@ void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia);
 // took the failure path and returned without advancing pc -- an infinite
 // re-dispatch of the same address.
 bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
+bool ppc_psq_load_full(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
 bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
+bool ppc_psq_store_full(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
 u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia);
 void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia);
 void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia);
@@ -183,22 +185,78 @@ void ppc_memory_fence(void);
 // Kept to a single compare so the wrappers below inline naturally at -O2 (no
 // always_inline needed → no compile-time / code-size blowup at 80k+ sites).
 // Unsigned wrap makes any out-of-region address exceed the bound and fail.
+//
+// The hints below lay out the common case as the fall-through: the cached-RAM
+// hit, no write journal (only a watch or lockstep arms it), no reservation.
+// Measured together with the read/write_be* change in common/types.h, no-PGO
+// US module, 14000-frame VS fight, 3 alternating reps: -2.74% cycles (the bound
+// compare alone was profiled at 2.11 M cycles/frame), frame hashes identical.
+#if defined(__GNUC__) || defined(__clang__)
+#define DOLRECOMP_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define DOLRECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define DOLRECOMP_LIKELY(x)   (x)
+#define DOLRECOMP_UNLIKELY(x) (x)
+#endif
 DOLRECOMP_AI u8* dolrecomp_cached_ram(const CPUState* cpu, u32 addr, u32 size) {
     u32 off = addr - GC_RAM_BASE;
-    return off <= cpu->ram_size - size ? cpu->ram + off : (u8*)0;
+    return DOLRECOMP_LIKELY(off <= cpu->ram_size - size) ? cpu->ram + off : (u8*)0;
 }
 
 // host is always inside cpu->ram here (cached MEM1), so the journal offset is
 // direct and needs no range check.
+/* DOLRECOMP_MEM_FAST (module-src MODULE_MEM_FAST) strips what a shipped module
+ * never needs from every inlined RAM access:
+ *   - the write-journal test: only lockstep and RINGOUT_DETERMINISM_WATCH arm
+ *     the journal, and ppc_set_mem_write_journal says so when it is compiled out;
+ *   - the reservation test, only when the recompiler proved the DOL has no
+ *     lwarx/stwcx (DOLRECOMP_DOL_NO_RESERVATION in generated.h): nothing else
+ *     ever sets reserve_valid, so the test can never be true;
+ *   - the NULL test on the host pointer (see the accessors below). */
 DOLRECOMP_AI void dolrecomp_journal_cached(CPUState* cpu, const u8* host, u32 size) {
-    if (g_mem_write_journal)
+#if defined(DOLRECOMP_MEM_FAST)
+    (void)cpu; (void)host; (void)size;
+#else
+    if (DOLRECOMP_UNLIKELY(g_mem_write_journal))
         g_mem_write_journal((u32)(host - cpu->ram), size, g_mem_write_journal_user);
+#endif
 }
 DOLRECOMP_AI void dolrecomp_clear_reservation(CPUState* cpu, u32 addr) {
-    if (cpu->reserve_valid && ((cpu->reserve_addr ^ addr) & ~31u) == 0)
+#if defined(DOLRECOMP_MEM_FAST) && defined(DOLRECOMP_DOL_NO_RESERVATION)
+    (void)cpu; (void)addr;
+#else
+    if (DOLRECOMP_UNLIKELY(cpu->reserve_valid) && ((cpu->reserve_addr ^ addr) & ~31u) == 0)
         cpu->reserve_valid = false;
+#endif
 }
 
+#if defined(DOLRECOMP_MEM_FAST)
+/* Branch on the range itself. The generic accessors test the pointer returned
+ * by dolrecomp_cached_ram, and since ram + off could in principle be NULL the
+ * compiler keeps a `test ram, ram` on every access even after the range test. */
+#define DOLRECOMP_MEM_FAST_RW(bits, rd, wr)                                          \
+    DOLRECOMP_AI u##bits mem_read##bits(CPUState* cpu, u32 addr) {                   \
+        u32 off = addr - GC_RAM_BASE;                                                \
+        return DOLRECOMP_LIKELY(off <= cpu->ram_size - (bits / 8u))                  \
+            ? rd(cpu->ram + off) : mem_read##bits##_slow(cpu, addr);                 \
+    }                                                                                \
+    DOLRECOMP_AI void mem_write##bits(CPUState* cpu, u32 addr, u##bits value) {      \
+        u32 off = addr - GC_RAM_BASE;                                                \
+        if (DOLRECOMP_LIKELY(off <= cpu->ram_size - (bits / 8u))) {                  \
+            dolrecomp_clear_reservation(cpu, addr);                                  \
+            wr(cpu->ram + off, value);                                               \
+        } else {                                                                     \
+            mem_write##bits##_slow(cpu, addr, value);                                \
+        }                                                                            \
+    }
+static inline u8 dolrecomp_rd8(const u8* h) { return *h; }
+static inline void dolrecomp_wr8(u8* h, u8 v) { *h = v; }
+DOLRECOMP_MEM_FAST_RW(8, dolrecomp_rd8, dolrecomp_wr8)
+DOLRECOMP_MEM_FAST_RW(16, read_be16, write_be16)
+DOLRECOMP_MEM_FAST_RW(32, read_be32, write_be32)
+DOLRECOMP_MEM_FAST_RW(64, read_be64, write_be64)
+#undef DOLRECOMP_MEM_FAST_RW
+#else
 DOLRECOMP_AI u8 mem_read8(CPUState* cpu, u32 addr) {
     u8* h = dolrecomp_cached_ram(cpu, addr, 1u);
     return h ? *h : mem_read8_slow(cpu, addr);
@@ -236,6 +294,7 @@ DOLRECOMP_AI void mem_write64(CPUState* cpu, u32 addr, u64 value) {
     if (h) { dolrecomp_clear_reservation(cpu, addr); dolrecomp_journal_cached(cpu, h, 8u); write_be64(h, value); }
     else mem_write64_slow(cpu, addr, value);
 }
+#endif
 
 /* LAZY FPRF.
  *
@@ -331,5 +390,76 @@ static inline bool ppc_fp_available(CPUState* cpu, u32 cia) {
     ppc_take_exception(cpu, PPC_EXC_FP_UNAVAILABLE, PPC_VECTOR_FP_UNAVAILABLE, cia, 0);
     return false;
 }
+
+
+/* Paired-single quantised load/store: a SLIM inline fast path per call site.
+ *
+ * Every psq_l/psq_st in a chunk used to be a 7-argument out-of-line call (the
+ * 1.6.1 profile charged ppc_psq_store alone 4.34% of the CPU thread). Inlining
+ * the WHOLE function removed 7.3% of instructions but grew .text 25% and cost
+ * +5.46% cycles. So only the common case is inlined here: quantisation type 0
+ * (plain f32), psq enabled, address aligned. Anything else -- the integer
+ * types, a disabled HID2 bit, a misaligned address that must raise the
+ * alignment exception -- calls the unchanged full implementation, which
+ * re-checks everything, so behaviour is identical by construction.
+ *
+ * Type 0 facts from ppc_psq_*_full: size 4, so lane 1 is at ea+4 and is aligned
+ * whenever ea is; a load is (f64)f32; a store writes 0 for a denormal single.
+ *
+ * OPT-IN (DOLRECOMP_PSQ_FAST, module CMake option MODULE_PSQ_FAST). It changes
+ * every chunk's control flow before inlining, so a PGO profile trained without
+ * it stops matching -- measured: clang drops the counts on a Japanese chunk.
+ * setup turns it on only for a disc whose shipped profile was trained with it. */
+#if defined(DOLRECOMP_PSQ_FAST) && !defined(DOLRECOMP_PSQ_OUT_OF_LINE)
+/* always_inline, not plain inline: a PGO profile keys an INTERNAL-linkage
+ * function as "<source path>;<name>". Plain inline let clang keep an out-of-line
+ * copy of dolrecomp_psq_store_inline in ~100 chunks, so the trained profile
+ * embedded the build machine's directory layout and those counts could never
+ * match on a player's machine, where the path differs. */
+#if defined(__GNUC__) || defined(__clang__)
+#define DOLRECOMP_PSQ_AI static inline __attribute__((always_inline))
+#else
+#define DOLRECOMP_PSQ_AI static inline
+#endif
+DOLRECOMP_PSQ_AI bool dolrecomp_psq_type0_ok(const CPUState* cpu, u32 gqr_type_bits, u32 ea, bool indexed) {
+    return gqr_type_bits == 0u && (ea & 3u) == 0u &&
+           (cpu->hid2 & PPC_HID2_PSE) != 0u && (indexed || (cpu->hid2 & PPC_HID2_LSQE) != 0u);
+}
+
+DOLRECOMP_PSQ_AI u32 dolrecomp_psq_single_bits(f64 value) {
+    f32 single = (f32)value;
+    u32 bits;
+    memcpy(&bits, &single, sizeof(bits));
+    return ((bits & 0x7F800000u) == 0u && (bits & 0x007FFFFFu) != 0u) ? 0u : bits;
+}
+
+DOLRECOMP_PSQ_AI f64 dolrecomp_psq_single_value(u32 bits) {
+    f32 single;
+    memcpy(&single, &bits, sizeof(single));
+    return (f64)single;
+}
+
+DOLRECOMP_PSQ_AI bool dolrecomp_psq_load_inline(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    if (__builtin_expect(dolrecomp_psq_type0_ok(cpu, (cpu->gqr[gqr_index & 7u] >> 16) & 7u, ea, indexed), 1)) {
+        cpu->fpr[frD] = dolrecomp_psq_single_value(mem_read32(cpu, ea));
+        cpu->ps1[frD] = w ? 1.0 : dolrecomp_psq_single_value(mem_read32(cpu, ea + 4u));
+        return true;
+    }
+    return ppc_psq_load_full(cpu, frD, ea, w, gqr_index, indexed, cia);
+}
+
+DOLRECOMP_PSQ_AI bool dolrecomp_psq_store_inline(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    if (__builtin_expect(dolrecomp_psq_type0_ok(cpu, cpu->gqr[gqr_index & 7u] & 7u, ea, indexed), 1)) {
+        mem_write32(cpu, ea, dolrecomp_psq_single_bits(cpu->fpr[frS]));
+        if (!w)
+            mem_write32(cpu, ea + 4u, dolrecomp_psq_single_bits(cpu->ps1[frS]));
+        return true;
+    }
+    return ppc_psq_store_full(cpu, frS, ea, w, gqr_index, indexed, cia);
+}
+
+#define ppc_psq_load  dolrecomp_psq_load_inline
+#define ppc_psq_store dolrecomp_psq_store_inline
+#endif
 
 #endif /* DOLRECOMP_CPU_H */

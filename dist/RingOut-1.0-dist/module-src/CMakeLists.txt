@@ -60,6 +60,23 @@ set_source_files_properties("${MODULE_TABLES}" PROPERTIES HEADER_FILE_ONLY TRUE 
 
 target_compile_definitions(${MODULE_NAME} PRIVATE MODULE_GAME_ID="${GAME_ID}")
 
+# Inline fast path for paired-single quantised loads/stores (cpu.h). -6.56% CPU
+# cycles on a US module, frame hashes identical. OFF by default because it
+# changes every chunk's control flow, so a profile trained without it no longer
+# matches; setup.sh turns it on only for discs whose profile was trained with it.
+option(MODULE_PSQ_FAST "Inline the common paired-single load/store path" OFF)
+if(MODULE_PSQ_FAST)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_PSQ_FAST)
+endif()
+
+# Leaner inlined RAM accesses (cpu.h DOLRECOMP_MEM_FAST): no write-journal test
+# (lockstep/determinism-watch only), no reservation test when the DOL has no
+# lwarx/stwcx, no host-pointer NULL test. Same profile caveat as PSQ_FAST.
+option(MODULE_MEM_FAST "Strip diagnostic and dead tests from inlined RAM access" OFF)
+if(MODULE_MEM_FAST)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_MEM_FAST)
+endif()
+
 target_include_directories(${MODULE_NAME} PRIVATE
   "${GENERATED_DIR}"
   "${DOLRECOMP_SRC}"

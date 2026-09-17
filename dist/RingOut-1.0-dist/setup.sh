@@ -362,8 +362,93 @@ mkdir -p "$HERE/work"
 # recompiler prints the address it found. If it finds none -- or more than one
 # candidate, which it will not guess between -- it says so and carries on; the
 # build is still correct, just slower.
+#
+# --leader-cases keeps chunk-entry switch cases only where control can arrive
+# (block leaders, FP-guard resume sites, every direct branch and jump-table
+# target in the program) instead of one per instruction. Frame hashes identical
+# to the full switch; with its retrained profile, -8.96% CPU cycles on a real
+# match against 1.6.1.
+#
+# EVERY DISC THIS SCRIPT KNOWS. The flag changes every chunk's control flow, so
+# a profile trained without it stops matching -- clang silently drops the counts,
+# which costs more than the flag saves, so a disc gets the flag only once its
+# own profile has been retrained with it. All four have been, and each was gated
+# on frame hashes identical to the full switch over 16000 frames of a real match
+# before its profile was trained:
+#     JP   (GRSJAF)  -20.00% CPU cycles against what that player gets today
+#     PAL  (GRSPAF)  -21.32%
+#     Plus (GRSEPS)  -20.73%
+# An unknown disc ID still gets none of this, and no profile.
+LEADER_CASES=()
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES=(--leader-cases);; esac
+# --direct-calls (same disc, same reason): a call into another chunk calls it
+# natively instead of returning to the dispatcher -- half the dispatches, -22.6%
+# CPU cycles with its profile against 1.6.1. It changes guest timing slightly,
+# so replays carry a timing marker and warn when played on a different build.
+# Every address the run loop hooks must still be reached through the
+# dispatcher, or the movie player's hooks would never fire: those are passed as
+# --dispatch-pc. They are US-disc addresses, which is part of why this is gated.
+#
+# Mapped for the other discs by .github/scripts/map-fmv-hooks.py (vote over
+# mid-function slices; a single shared delta across all six is the validator).
+# Recorded here so enabling a disc does not mean rediscovering them -- NOT used
+# yet, because --direct-calls also needs a hands-on playtest per disc:
+#   Plus (GRSEPS): identical to the US addresses, delta 0, 23-24/24 votes --
+#                  so the same list below is correct for it, and it is used.
+#   PAL  (GRSPAF): the whole library sits +0x7750 -> 0x80213938 0x80210888
+#                  0x80214B08 0x8020F5E0 0x8020F638 0x8020F994. Measured
+#                  (-16.38% on top) and gated, but NOT enabled: no playtest yet.
+#   JP   (GRSJAF): NOT mapped. Only 2 of 6 agree and their deltas do not
+#                  cluster, so its library is rearranged, not just relocated.
+#                  Also measured (-17.01%) and gated, also awaiting a playtest.
+# Note the runtime compares against the US literals whatever the disc, so on
+# JP/PAL these hooks cannot fire at all until it gains a per-disc table; the
+# mapped values matter for that fix, not for --dispatch-pc today.
+#
+# US AND PLUS. Plus is a hack of the US text -- its movie library is
+# byte-identical at all six addresses -- and it was playtested on this build,
+# which is the same bar the US disc had to clear.
+case "$DISC_ID" in
+GRSEAF|GRSEPS) LEADER_CASES+=(--direct-calls
+    --dispatch-pc 0x8020C1E8 --dispatch-pc 0x80209138 --dispatch-pc 0x8020D3B8
+    --dispatch-pc 0x80207E90 --dispatch-pc 0x80207EE8 --dispatch-pc 0x80208244);;
+# JP passes NO --dispatch-pc, and that is not an oversight. The run loop
+# compares against the US literals above whatever disc is running, and on this
+# disc those addresses are not entry points AT ALL -- 0 entry-switch cases and
+# absent from generated_entries.txt -- so they are never dispatched and the
+# comparison can never match. Passing them would only make the wrong code
+# reachable by the dispatcher. The idle PC protects itself (the recompiler adds
+# it, emitter.c emit_set_idle_pc), and it is in the entry list here with no
+# flag passed.
+GRSJAF) LEADER_CASES+=(--direct-calls);;
+# PAL passes its OWN six, mapped by .github/scripts/map-fmv-hooks.py: the whole
+# movie library sits +0x7750 from the US one. The run loop cannot hook them
+# today (it compares the US literals), so this is not what makes PAL safe --
+# the US literals are not entry points here either. It is passed because it is
+# what the playtested build was built with, and because it keeps the module
+# correct if the runtime ever gains a per-disc hook table. Six extra dispatch
+# points out of 185066.
+GRSPAF) LEADER_CASES+=(--direct-calls
+    --dispatch-pc 0x80213938 --dispatch-pc 0x80210888 --dispatch-pc 0x80214B08
+    --dispatch-pc 0x8020F5E0 --dispatch-pc 0x8020F638 --dispatch-pc 0x8020F994);;
+esac
+# --self-calls (same discs): a call to a function in the SAME chunk also calls
+# natively, so neither the call nor its return goes through the dispatcher.
+# -5.8% CPU cycles on top of the above for US; the two together are -16.34% for
+# Plus, taking it to -34.0% against what a Plus player gets today.
+case "$DISC_ID" in GRSEAF|GRSEPS|GRSJAF|GRSPAF) LEADER_CASES+=(--self-calls);; esac
+# The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
+# the same constraint and the same gate: it changes chunk control flow, so a
+# disc needs a profile trained with it. US, JP and PAL all have one. Every
+# module build below passes this.
+PSQ_FAST=()
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) PSQ_FAST=(-DMODULE_PSQ_FAST=ON);; esac
+# MODULE_MEM_FAST (same gate, same reason): leaner inlined RAM accesses with no
+# debug-journal, reservation or NULL tests. -6.3% CPU cycles on top of the
+# above with its retrained profile; the game's behaviour is unchanged.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) PSQ_FAST+=(-DMODULE_MEM_FAST=ON);; esac
 "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
-    -j"$(nproc)" "$HERE/work/out"
+    "${LEADER_CASES[@]}" -j"$(nproc)" "$HERE/work/out"
 # gen_module_tables.py reads main.dol from alongside the generated sources.
 cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol"
 
@@ -400,11 +485,12 @@ if "$CC" --version 2>&1 | grep -qi clang; then
     elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
         # SC2 Plus, the community mod. It appends its own code at 0x80476000 and
         # hooks the base text IN PLACE rather than relocating it, so its chunks
-        # are the US disc's chunks and the US profile is the right one -- which
-        # is also what this script gave it before profiles were split per disc.
-        # Not separately benchmarked, unlike the three stock regions; it is kept
-        # on the US profile because dropping it to none would be a silent
-        # regression for those players.
+        # are the US disc's chunks and the US profile really does apply -- that
+        # was confirmed directly, a Plus chunk compiled against the US profile
+        # carries !prof with a function_entry_count. Plus now ships a profile
+        # trained on Plus itself (-20.73% against the US-profile build), so this
+        # branch is only reached by an older or hand-assembled tree where that
+        # file is missing; the US profile is still the right fallback there.
         PROFILE="$HERE/module-src/profiles/GRSEAF.profdata"
     elif [ -f "$HERE/module-src/module.profdata" ] && [ "$DISC_ID" = "GRSEAF" ]; then
         # The original single-profile layout, kept so an older package or a
@@ -437,6 +523,7 @@ cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DCMAKE_C_COMPILER="$CC" \
       -DCMAKE_C_FLAGS="-march=$MARCH" \
       "${PGO_ARGS[@]}" \
+      "${PSQ_FAST[@]}" \
       -DGAME_ID="$DISC_ID" \
       -DGENERATED_DIR="$HERE/work/out/generated" \
       -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \
@@ -510,6 +597,7 @@ if [ "$PGO" = 1 ]; then
              -DCMAKE_C_FLAGS="-march=$MARCH -fprofile-generate=$PROFDIR" \
              -DCMAKE_SHARED_LINKER_FLAGS="-fprofile-generate=$PROFDIR" \
              -DMODULE_LTO=OFF \
+             "${PSQ_FAST[@]}" \
              -DGAME_ID="$DISC_ID" \
              -DGENERATED_DIR="$HERE/work/out/generated" \
              -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \
@@ -596,6 +684,7 @@ if [ "$PGO" = 1 ]; then
                      -DCMAKE_C_COMPILER="$CC" \
                      -DCMAKE_C_FLAGS="-march=$MARCH" \
                      -DMODULE_PGO_PROFILE="$HERE/work/local.profdata" \
+                     "${PSQ_FAST[@]}" \
                      -DGAME_ID="$DISC_ID" \
                      -DGENERATED_DIR="$HERE/work/out/generated" \
                      -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \

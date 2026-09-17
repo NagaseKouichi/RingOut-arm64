@@ -18,7 +18,9 @@
 #include "Core/NetPlay/NetPlayClient.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
+#include "VideoCommon/OnScreenDisplay.h"
 #include "Core/RecompDeterminism.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
@@ -139,6 +141,10 @@ struct Runtime::Impl {
   std::string title;
   std::unique_ptr<Platform> platform;
   Common::EventHook state_hook;
+  // Guest-timing class stamped in the replay being played (0 = not playing),
+  // checked once against the loaded module when the core starts running.
+  u32 replay_timing_id = 0;
+  bool replay_timing_checked = false;
   bool ui_initialized = false;
   bool controllers_initialized = false;
   bool booted = false;
@@ -726,6 +732,19 @@ RuntimeRunResult Runtime::Run() {
     // the recording runs out of input.
     movie.SetReadOnly(true);
     RecompMenu::SetActiveReplay(m_impl->config.replay_movie.filename().string());
+    // Which guest timing was this recorded under? Replays saved by this runtime
+    // carry "RO" + the module's timing class in the header's last reserved bytes
+    // (DTMHeader::reserved2, offset 245). Anything older has no marker and was
+    // recorded before --direct-calls existed, i.e. under dispatcher timing (1).
+    {
+      m_impl->replay_timing_id = 1;
+      m_impl->replay_timing_checked = false;
+      std::ifstream dtm(m_impl->config.replay_movie, std::ios::binary);
+      char marker[3] = {};
+      if (dtm.seekg(245) && dtm.read(marker, 3) && marker[0] == 'R' && marker[1] == 'O' &&
+          marker[2] != 0)
+        m_impl->replay_timing_id = static_cast<unsigned char>(marker[2]);
+    }
     std::fprintf(stderr, "[replay] playing %s\n",
                  m_impl->config.replay_movie.string().c_str());
   } else if (!m_impl->config.record_movie.empty()) {
@@ -769,8 +788,40 @@ RuntimeRunResult Runtime::Run() {
           auto& m = Core::System::GetInstance().GetMovie();
           if (m.IsRecordingInput()) {
             m.SaveRecording(m_impl->config.record_movie.string());
+            // Stamp the guest-timing class this was recorded under, so playing
+            // it on a build with different timing can warn instead of silently
+            // replaying a different match. Written into DTMHeader::reserved2
+            // (offset 245), which Dolphin zeroes and never reads.
+            {
+              const u32 timing =
+                  (g_static_recomp_core && g_static_recomp_core->TimingId() != 0) ?
+                      g_static_recomp_core->TimingId() :
+                      1u;
+              std::fstream dtm(m_impl->config.record_movie,
+                               std::ios::binary | std::ios::in | std::ios::out);
+              const char marker[3] = {'R', 'O', static_cast<char>(timing & 0xFFu)};
+              if (dtm.seekp(245))
+                dtm.write(marker, 3);
+            }
             std::fprintf(stderr, "[replay] saved %s\n",
                          m_impl->config.record_movie.string().c_str());
+          }
+        }
+        // Once the core runs, compare the replay's timing class with the loaded
+        // module's. A mismatch still plays -- the pads are identical -- but the
+        // match will not unfold the same, so say so.
+        if (state == Core::State::Running && m_impl->replay_timing_id != 0 &&
+            !m_impl->replay_timing_checked) {
+          m_impl->replay_timing_checked = true;
+          const u32 current = g_static_recomp_core ? g_static_recomp_core->TimingId() : 0u;
+          if (current != 0 && current != m_impl->replay_timing_id) {
+            std::fprintf(stderr,
+                         "[replay] WARNING: recorded under guest timing %u, this build uses %u; "
+                         "the match will not play back the same\n",
+                         m_impl->replay_timing_id, current);
+            OSD::AddMessage("This replay was recorded on a different build and will not play "
+                            "back the same match.",
+                            10000);
           }
         }
         if (state == Core::State::Uninitialized && m_impl->platform)

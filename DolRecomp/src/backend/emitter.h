@@ -43,9 +43,33 @@ void emit_add_dispatch_pc(u32 pc);
 /* Turn local `bl` into a native goto (--chain-calls). Unproven: see emitter.c. */
 void emit_set_chain_calls(bool enable);
 
-/* Chunk-entry switch at leaders only (--leader-cases). Incomplete: see emitter.c. */
+/* Reduced chunk-entry switch (--leader-cases): cases only where control can
+   actually arrive. See emitter.c for the entry rule and its evidence. */
 void emit_set_leader_cases(bool enable);
 
+/* Program-wide entry targets for --leader-cases: every direct branch target in
+   any code section plus every data word pointing into code. Copied. MAIN THREAD
+   ONLY, before any chunk job runs; the workers only read it. */
+void emit_set_entry_targets(const u32* targets, u32 count);
+
+/* Cross-chunk `bl` as a direct call to the target chunk (--direct-calls); see
+   emitter.c. Needs the chunk table (emit_set_chunk_table). */
+void emit_set_direct_calls(bool enable);
+bool emit_direct_calls_enabled(void);
+
+/* --exit-stats: count dispatches by the instruction that caused them
+   (diagnostic build; prints when the module unloads). */
+void emit_set_exit_stats(bool enable);
+bool emit_exit_stats_enabled(void);
+
+/* The DOL has no lwarx/stwcx: generated.h gets DOLRECOMP_DOL_NO_RESERVATION. */
+void emit_set_no_reservation(bool none);
+
+/* Widenings of --direct-calls (--self-calls, --tail-calls); see emitter.c. */
+void emit_set_self_calls(bool enable);
+void emit_set_tail_calls(bool enable);
+bool emit_self_calls_enabled(void);
+bool emit_tail_calls_enabled(void);
 /* XER[CA] dead-write analysis (--ca-liveness). REPORTING ONLY: it counts how
    many write sites a SOUND intraprocedural analysis can prove dead, which is
    the number that decides whether eliding them is worth the risk. Emitted code

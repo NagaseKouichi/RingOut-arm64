@@ -75,7 +75,7 @@ jobs:
           apt-get install -y --no-install-recommends git ca-certificates
 
       - name: Check out
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install build dependencies
         # Read from the shared list so this cannot drift from the local podman
@@ -100,7 +100,7 @@ jobs:
       # Keyed by SHA with a prefix fallback, so every run restores the newest
       # cache and saves its own; eviction is GitHub's problem.
       - name: Restore compiler cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-deck-${{ github.sha }}

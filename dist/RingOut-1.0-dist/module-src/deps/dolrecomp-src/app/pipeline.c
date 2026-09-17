@@ -1085,8 +1085,8 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         // fall back to the dispatcher because their symbols are not known yet.
         const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
         u32* chunk_starts = NULL;
-        if (direct && strcmp(direct, "1") == 0) {
-            printf("  unsafe cross-chunk direct calls enabled\n");
+        if ((direct && strcmp(direct, "1") == 0) || emit_direct_calls_enabled()) {
+            printf("  cross-chunk direct calls enabled\n");
             chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
             if (chunk_starts) {
                 for (u32 i = 0; i < funcs.count; ++i)
@@ -1206,9 +1206,60 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
         section->embedded_data_mode = EMBEDDED_DATA_DOL;
     }
 
-    return emit_code_sections_split(sections, section_count, output_path, cpu,
-                                    dol->header.entry_point, jobs,
-                                    local_chunks_dir, symbols);
+    /* Program-wide entry targets for the reduced entry switch (--leader-cases;
+     * ignored otherwise). Leaders are computed per chunk, so this is where a
+     * target reached from ANOTHER chunk, or only through a jump table, becomes
+     * visible: every direct b/bc target (bl included) in any text section, plus
+     * every aligned data word that points into text. A superset is safe -- an
+     * extra case costs a little codegen, a missing one changes guest timing. */
+    u32 target_cap = 0, target_count = 0;
+    u32* targets = NULL;
+    for (u32 s = 0; s < section_count; s++)
+        target_cap += sections[s].size / 4u;
+    for (u32 i = 0; i < DOL_NUM_DATA; i++)
+        target_cap += dol->header.data_sizes[i] / 4u;
+    /* lwarx/stwcx are the only instructions that use the reservation. With none
+     * in any text section, reserve_valid can never become true, and a
+     * DOLRECOMP_MEM_FAST module drops the per-write reservation test. */
+    u32 reservation_ops = 0;
+    targets = (u32*)malloc((size_t)(target_cap ? target_cap : 1u) * sizeof(u32));
+    if (targets) {
+        for (u32 s = 0; s < section_count; s++) {
+            for (u32 k = 0; k + 4u <= sections[s].size; k += 4u) {
+                PPCInst inst = ppc_decode(read_be32(sections[s].data + k), sections[s].address + k);
+                if (inst.op == PPC_OP_B || inst.op == PPC_OP_BC)
+                    targets[target_count++] = inst.branch_target;
+                if (inst.op == PPC_OP_LWARX || inst.op == PPC_OP_STWCX)
+                    reservation_ops++;
+            }
+        }
+        emit_set_no_reservation(reservation_ops == 0u);
+        for (u32 i = 0; i < DOL_NUM_DATA; i++) {
+            const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, (int)i) : NULL;
+            if (!data)
+                continue;
+            for (u32 k = 0; k + 4u <= dol->header.data_sizes[i]; k += 4u) {
+                u32 word = read_be32(data + k);
+                if ((word & 3u) != 0)
+                    continue;
+                for (u32 s = 0; s < section_count; s++) {
+                    if (word >= sections[s].address && word - sections[s].address < sections[s].size) {
+                        targets[target_count++] = word;
+                        break;
+                    }
+                }
+            }
+        }
+        emit_set_entry_targets(targets, target_count);
+        free(targets);
+    }
+
+    int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
+                                      dol->header.entry_point, jobs,
+                                      local_chunks_dir, symbols);
+    emit_set_entry_targets(NULL, 0);
+    emit_set_no_reservation(false);
+    return ok;
 }
 
 int emit_rpx_split(const RPXFile* rpx, const char* output_path,

@@ -1,3 +1,4 @@
+#include "backend/emitter.h"
 #include "backend/dispatch.h"
 #include <stdlib.h>
 #include <string.h>
@@ -366,6 +367,13 @@ static void emit_lookup_linear(FILE* out, const FunctionList* funcs) {
 
 void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point) {
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
+    /* Guest-timing class, exported by the module as staticrecomp_timing_id for
+       replay compatibility. Only written under --direct-calls, so a default
+       generation stays byte-identical; the module template defaults to 1. */
+    if (emit_direct_calls_enabled() && (emit_self_calls_enabled() || emit_tail_calls_enabled()))
+        fprintf(out, "#define DOLRECOMP_TIMING_ID 3u\n");
+    else if (emit_direct_calls_enabled())
+        fprintf(out, "#define DOLRECOMP_TIMING_ID 2u\n");
     fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
     fprintf(out, "\n#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)\n");
     fprintf(out, "int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address);\n");

@@ -309,6 +309,10 @@ fi
 # 755 file still unpacks 755, and the canary below would catch it if it did.
 echo "==> zipping"
 rm -f "$ZIP"
+# Same stamp as package-dist.sh: TZ=UTC makes unzip, which reads the stored
+# zone-less times as LOCAL, put a just-packaged file up to 12 hours in the
+# future west of UTC. A day in the past is beyond any offset.
+find "$STAGE" -exec touch -h -d "@$(( $(date +%s) - 86400 ))" {} +
 ( cd "$WORK" && TZ=UTC zip -X -qr "$ZIP" "$(basename "$STAGE")" )
 
 verify="$WORK/_verify"

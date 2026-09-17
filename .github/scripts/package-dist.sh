@@ -126,8 +126,10 @@ if [ -d "$STAGE/module-src/profiles" ]; then
   for prof in "$STAGE/module-src/profiles"/*.profdata; do
     [ -e "$prof" ] || continue
     id="$(basename "$prof" .profdata)"
+    # GRSEPS is the SC2 Plus mod. It gets its own file since the US disc's
+    # profile is trained with --leader-cases and Plus is built without it.
     case "$id" in
-      GRS[EJP]A[FS]) ;;
+      GRS[EJP]A[FS]|GRSEPS) ;;
       *) echo "  FAIL: $id is not a disc ID this game ships as" >&2; exit 1 ;;
     esac
     echo "    $id: $(du -h "$prof" | cut -f1)"
@@ -335,6 +337,15 @@ echo "  no disc-derived content"
 # 755 file still unpacks 755, and the canary below would catch it if it did.
 echo "==> zipping"
 rm -f "$ZIP"
+# TZ=UTC has a side effect: zip stores DOS wall-clock times with no zone, and
+# unzip reads them as LOCAL time, so for anyone west of UTC a file packaged
+# minutes ago unpacks up to 12 hours in the FUTURE. A module-src/CMakeLists.txt
+# edited shortly before a release then looks newer than the build.ninja CMake
+# just wrote, and setup.sh dies in "manifest 'build.ninja' still dirty after 100
+# tries". Stamp the stage a day in the past first: beyond any zone offset, and
+# it says nothing about where or when exactly this was built. The source-tree
+# freshness checks above already ran, so this changes nothing they compare.
+find "$STAGE" -exec touch -h -d "@$(( $(date +%s) - 86400 ))" {} +
 ( cd "$WORK" && TZ=UTC zip -X -qr "$ZIP" "$(basename "$STAGE")" )
 
 echo

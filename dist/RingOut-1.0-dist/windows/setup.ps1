@@ -184,7 +184,52 @@ $jobs = [Environment]::ProcessorCount
 # the CPU thread spins at full load, which is exactly "one core pegged, well
 # under 60". "auto" finds the loop in THIS disc (0x80185DEC US, 0x8017F35C JP,
 # 0x8018D544 PAL) and prints it; setup.sh has passed it since 2026-08-25.
-& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto "-j$jobs" (Join-Path $Work 'out')
+# --leader-cases: switch cases only where control can arrive, not one per
+# instruction (identical game state; -8.96% CPU cycles with its retrained
+# profile). EVERY KNOWN DISC, exactly as setup.sh: the flag changes every chunk's
+# control flow, so a disc gets it only once its own profile has been retrained
+# with it. All three have been, each gated on identical frame hashes over 16000
+# frames first: JP -20.00% cycles, PAL -21.32%, Plus -20.73%, against what
+# those players get today. An unknown disc ID still gets none of this.
+$LeaderCases = @()
+if ('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS' -contains $DiscId) { $LeaderCases = @('--leader-cases') }
+if ('GRSEAF', 'GRSEPS' -contains $DiscId) {
+    # --direct-calls, exactly as setup.sh: cross-chunk calls stay native (-22.6%
+    # CPU cycles with its profile). It changes guest timing slightly, so replays
+    # carry a timing marker. Every PC the run loop hooks (the movie player's)
+    # must still go through the dispatcher, so each is passed as --dispatch-pc.
+    # US and Plus take this list: Plus is a hack of the US text, so its movie
+    # library is byte-identical at all six of these addresses, and it was
+    # playtested on this build. JP is playtested too but needs none of them
+    # (see below). PAL is measured and gated but awaits a playtest.
+    $LeaderCases = @('--leader-cases', '--direct-calls',
+        '--dispatch-pc', '0x8020C1E8', '--dispatch-pc', '0x80209138', '--dispatch-pc', '0x8020D3B8',
+        '--dispatch-pc', '0x80207E90', '--dispatch-pc', '0x80207EE8', '--dispatch-pc', '0x80208244',
+        # --self-calls, as setup.sh: a call within the same chunk is native too
+        # (-5.8% CPU cycles on top, with its own retrained profile).
+        '--self-calls')
+}
+elseif ($DiscId -eq 'GRSPAF') {
+    # PAL, playtested, with its OWN six: the movie library sits +0x7750 from the
+    # US one (mapped by .github/scripts/map-fmv-hooks.py, all six agreeing on
+    # that delta). The run loop cannot hook them today -- it compares the US
+    # literals, which are not entry points on this disc either -- so this is
+    # passed to match the playtested build and to stay correct if the runtime
+    # ever gains a per-disc hook table.
+    $LeaderCases = @('--leader-cases', '--direct-calls',
+        '--dispatch-pc', '0x80213938', '--dispatch-pc', '0x80210888', '--dispatch-pc', '0x80214B08',
+        '--dispatch-pc', '0x8020F5E0', '--dispatch-pc', '0x8020F638', '--dispatch-pc', '0x8020F994',
+        '--self-calls')
+}
+elseif ($DiscId -eq 'GRSJAF') {
+    # JP, playtested too, but with NO --dispatch-pc and that is deliberate: the
+    # run loop compares against the US literals above whatever disc runs, and on
+    # this disc those addresses are not entry points at all (0 entry-switch
+    # cases, absent from generated_entries.txt), so they are never dispatched
+    # and the comparison can never match. The idle PC protects itself.
+    $LeaderCases = @('--leader-cases', '--direct-calls', '--self-calls')
+}
+& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto @LeaderCases "-j$jobs" (Join-Path $Work 'out')
 if ($LASTEXITCODE -ne 0) { Die "Recompilation failed." }
 
 # gen_module_tables.py reads main.dol from alongside the generated sources.
@@ -237,6 +282,16 @@ if (Test-Path -LiteralPath $PgoProfile) {
     Write-Host "    Your module is correct; a profiled build is 10-14% faster."
 }
 
+# Inline paired-single fast path: every known disc, same gate as --leader-cases
+# -- it changes chunk control flow, so a disc needs a profile trained with it,
+# and all four now have one.
+# MODULE_MEM_FAST, as setup.sh: leaner inlined RAM accesses (-6.3% CPU cycles
+# with its retrained profile; the game's behaviour is unchanged).
+$PsqFast = @()
+if ('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS' -contains $DiscId) {
+    $PsqFast = @('-DMODULE_PSQ_FAST=ON', '-DMODULE_MEM_FAST=ON')
+}
+
 & $Cmake -S (Join-Path $Here 'module-src') -B (Join-Path $Work 'build') -GNinja `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
     -DCMAKE_BUILD_TYPE=Release `
@@ -244,6 +299,7 @@ if (Test-Path -LiteralPath $PgoProfile) {
     "-DPython3_EXECUTABLE=$Python" `
     -DCMAKE_C_FLAGS="-march=native" `
     @PgoArgs `
+    @PsqFast `
     "-DGAME_ID=$DiscId" `
     "-DGENERATED_DIR=$(Join-Path $Work 'out\generated')" `
     "-DDOLRECOMP_SRC=$(Join-Path $Deps 'dolrecomp-src')" `

@@ -27,6 +27,10 @@ typedef struct {
     u32 dispatch_pc_count;
     int chain_calls;
     int leader_cases;
+    int direct_calls;   // --direct-calls
+    int self_calls;     // --self-calls (needs --direct-calls)
+    int tail_calls;     // --tail-calls (needs --direct-calls)
+    int exit_stats;     // --exit-stats (diagnostic: count dispatches by cause)
     int ca_liveness;
     int ca_elide;       // --ca-elide (changes codegen; off by default)
     int cpu_explicit;

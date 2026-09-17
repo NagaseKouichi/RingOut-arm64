@@ -445,19 +445,37 @@ void emit_set_chain_calls(bool enable) {
     s_chain_calls = enable;
 }
 
-/* --leader-cases: emit the chunk-entry switch only at block leaders.
+/* --leader-cases: emit the chunk-entry switch only where control can arrive.
  *
- * HYPOTHESIS TEST, not a shipping option. One case per guest instruction makes
- * every instruction a switch-reachable join point, so the compiler must assume
- * control can arrive there with unknown state and cannot keep guest registers
- * in host registers across a block -- exactly the advantage Dolphin's JIT has.
+ * One case per guest instruction makes every instruction a switch-reachable
+ * join point, and the compiler generates worse code for the whole body around
+ * them. Measured on the no-PGO US module, VS stage-10 fight, 14000 frames, 3
+ * alternating reps: -7.96% cycles, -2.97% instructions, IPC 2.75 -> 2.90 --
+ * the win is mostly tighter code, not less of it.
  *
- * INCOMPLETE ON PURPOSE: an exception stores the faulting address in srr0 and
- * rfi resumes there, mid-block, so a correct version needs leaders UNION fault
- * sites (the refund work counts 89391 of those). This build can therefore wedge
- * on a mid-block resume. It exists to answer "does it even help?" before that
- * work is done -- the determinism harness detects the breakage immediately. */
+ * THE ENTRY RULE. Block leaders are not enough; the entry set is leaders UNION:
+ *  - every instruction with an FP-availability guard. The guard refunds the
+ *    rest of the block and returns; the OS enables the FPU lazily and rfi's
+ *    back to that same instruction. Without a case the chassis interprets up to
+ *    the next entry and CHARGES those instructions, where native re-entry
+ *    charged nothing, so event timing shifts: 685 heap-only frame diffs.
+ *  - every direct branch target in the program (s_entry_targets). Leaders are
+ *    computed per chunk, so a target reached only from another chunk is not a
+ *    leader in its own.
+ *  - every data word pointing into code (also s_entry_targets): switch jump
+ *    tables and code pointers.
+ * Leaders alone reproduced the old 2026-08-07 failure mode; this set is
+ * frame-hash identical to the full switch on two routes (VS fight 14000
+ * frames, arcade match 16000), with no runtime observation as input. It keeps
+ * 181997 of 537792 cases on the US disc.
+ *
+ * Blocks are NOT split at the extra entries: leader[] still decides the pc
+ * store and downcount charge, entry[] only decides the switch. Merging them
+ * would move cycle charges and change guest timing. */
 static bool s_leader_cases = false;
+
+static u32* s_entry_targets = NULL;
+static u32 s_entry_target_count = 0;
 
 /* Addresses the entry switch actually has a case for, accumulated across every
  * emitted function. Only collected when the entry set is REDUCED: with the full
@@ -517,6 +535,38 @@ void emit_set_leader_cases(bool enable) {
     s_leader_cases = enable;
 }
 
+void emit_set_entry_targets(const u32* targets, u32 count) {
+    free(s_entry_targets);
+    s_entry_targets = NULL;
+    s_entry_target_count = 0;
+    if (!targets || count == 0)
+        return;
+    s_entry_targets = (u32*)malloc((size_t)count * sizeof(u32));
+    if (!s_entry_targets)
+        return;   /* degrades to leaders + FP sites; the hash gate would show it */
+    memcpy(s_entry_targets, targets, (size_t)count * sizeof(u32));
+    qsort(s_entry_targets, count, sizeof(u32), compare_u32);
+    s_entry_target_count = count;
+}
+
+/* Is this instruction an entry beyond being a block leader? See the rule at
+ * s_leader_cases. Read-only on s_entry_targets, so safe on the workers. */
+static bool is_extra_entry(const PPCInst* inst) {
+    u32 lo = 0, hi = s_entry_target_count;
+    if (inst->embedded_data)
+        return false;
+    if (ppc_op_uses_fpu(inst->op))
+        return true;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (s_entry_targets[mid] < inst->address)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo < s_entry_target_count && s_entry_targets[lo] == inst->address;
+}
+
 static u32 s_dispatch_pcs[32];
 static u32 s_dispatch_pc_count = 0;
 
@@ -571,17 +621,158 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
     return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
 }
 
-// Upstream (98f77b6) emits direct calls between chunks and sets this table from
-// pipeline.c. This fork does not take that path yet: its own measurement is
-// still owed, and upstream reports +2.9% with overlapping ranges -- "not
-// demonstrated" by the standard used here. The entry point exists so the shared
-// pipeline links; passing a table would be the only thing needed to enable it.
-void emit_set_chunk_table(const u32* starts, u32 count) {
-    (void)starts;
-    (void)count;
+/* --direct-calls: a `bl` into ANOTHER chunk calls that chunk's function
+ * directly instead of returning to the chassis (after upstream 98f77b6).
+ *
+ * Measured on the US disc: 84.1% of all dispatches cross a chunk boundary
+ * (793 M of 943 M over 14000 frames), and a guest call costs two of them --
+ * the call and the callee's blr. A direct call removes both: the callee's
+ * blr sets ctx->pc to the return address and returns from its C function, and
+ * the caller resumes inline when that is the instruction after the call.
+ * ANY other pc -- an exception, an exhausted loop budget, a tail call, a
+ * target the callee's entry switch has no case for -- falls back to the
+ * original `return`, which is always correct because ctx->pc already names
+ * where the guest is.
+ *
+ * Constraints: calls to a PC the run loop hooks (must_reach_dispatcher: the
+ * idle loop and every --dispatch-pc) keep returning, or the hook never fires;
+ * guest recursion becomes host recursion, capped by DOLRECOMP_C_MAX_CALL_DEPTH;
+ * and the chassis's per-dispatch work (timebase advance, downcount flush,
+ * chunk verification on first dispatch) runs less often, so guest timing and
+ * frame hashes legitimately change -- validate by determinism and content, not
+ * by equality with the non-direct build. */
+static bool s_direct_calls = false;
+static u32* s_chunk_starts = NULL;
+static u32 s_chunk_count = 0;
+
+void emit_set_direct_calls(bool enable) {
+    s_direct_calls = enable;
 }
 
-static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target) {
+bool emit_direct_calls_enabled(void) {
+    return s_direct_calls;
+}
+
+/* Chunk entry addresses in ascending order. MAIN THREAD ONLY, before the chunk
+ * jobs run; the workers only read it. Copied. */
+void emit_set_chunk_table(const u32* starts, u32 count) {
+    free(s_chunk_starts);
+    s_chunk_starts = NULL;
+    s_chunk_count = 0;
+    if (!starts || count == 0)
+        return;
+    s_chunk_starts = (u32*)malloc((size_t)count * sizeof(u32));
+    if (!s_chunk_starts)
+        return;   /* degrades to the return-to-chassis form */
+    memcpy(s_chunk_starts, starts, (size_t)count * sizeof(u32));
+    s_chunk_count = count;
+}
+
+/* The chunk whose func_<start>() covers addr, or 0. A target past the end of
+ * the last chunk resolves to that chunk, whose entry switch has no case for it:
+ * the call returns at once with ctx->pc unchanged and the caller falls back. */
+static u32 chunk_start_for(u32 addr) {
+    u32 lo = 0, hi = s_chunk_count;
+    if (!s_chunk_starts)
+        return 0;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (s_chunk_starts[mid] <= addr)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo ? s_chunk_starts[lo - 1u] : 0;
+}
+
+/* --self-calls and --tail-calls widen --direct-calls (and need it: they share its
+ * chunk table, depth guard and hook rule).
+ *
+ * --self-calls: a `bl` to a function in the SAME chunk calls the chunk's own C
+ * function, entering through its switch, instead of returning to the chassis.
+ * The call and the callee's blr cost a dispatch each otherwise. (--chain-calls
+ * made the call a goto, which kept the blr's dispatch; measured no win.)
+ *
+ * --tail-calls: a `b` into another chunk calls that chunk and then returns
+ * whatever pc it left. The callee's blr lands in OUR caller's continuation, so
+ * a caller that called us directly resumes inline instead of taking two
+ * dispatches (the branch, then the blr back). */
+static bool s_self_calls;
+static bool s_tail_calls;
+
+/* --exit-stats: count every return to the chassis by the instruction that
+ * caused it. The dispatch log in the runtime can only say where control
+ * ARRIVED, so it cannot tell a blr from a jump table, which is exactly what
+ * decides where dispatch work is worth removing. Diagnostic only: one
+ * increment per dispatch, and nothing is emitted without the flag. */
+static bool s_exit_stats;
+void emit_set_exit_stats(bool enable) { s_exit_stats = enable; }
+bool emit_exit_stats_enabled(void) { return s_exit_stats; }
+
+/* MEASURED DEAD, do not rebuild it: resuming on ANY entry of this chunk after a
+ * native call (a label before the entry switch, re-entered when the callee came
+ * back to some other pc). It collapses its target -- 54.0 M of 291.3 M
+ * instrumented exits become 2.9 M -- and unprofiled it looked like a win
+ * (-3.74% cycles, -9.89% instructions). WITH THE PROFILE, which is what ships,
+ * it is +7.96% cycles and +10.34% instructions: the profiled build already gets
+ * that work, and 25229 extra backward edges into the entry switch then wreck
+ * the profile-driven layout. A no-PGO A/B is a screen, not a verdict. */
+
+/* Keep in step with the enum emitted into generated.h. */
+static void emit_exit_stat(FILE* out, const char* indent, const char* kind) {
+    if (s_exit_stats)
+        fprintf(out, "%sdolrecomp_exit_stat(DR_EXIT_%s);\n", indent, kind);
+}
+void emit_set_self_calls(bool enable) { s_self_calls = enable; }
+void emit_set_tail_calls(bool enable) { s_tail_calls = enable; }
+bool emit_self_calls_enabled(void) { return s_self_calls; }
+bool emit_tail_calls_enabled(void) { return s_tail_calls; }
+
+static bool emit_cross_chunk_tail(FILE* out, const PPCInst* inst, u32 func_start) {
+    u32 target_chunk;
+    if (!s_tail_calls || !s_direct_calls || must_reach_dispatcher(inst->branch_target))
+        return false;
+    target_chunk = chunk_start_for(inst->branch_target);
+    if (!target_chunk || target_chunk == func_start)
+        return false;
+    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+    fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                dolrecomp_call_leave();\n");
+    fprintf(out, "            }\n");
+    fprintf(out, "            return;\n");
+    return true;
+}
+
+static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst, u32 func_start, u32 func_end) {
+    u32 continuation = inst->address + 4u;
+    u32 target_chunk;
+    if (!s_direct_calls || must_reach_dispatcher(inst->branch_target))
+        return false;
+    if (branch_target_is_local(func_start, func_end, inst->branch_target))
+        target_chunk = s_self_calls ? func_start : 0u;
+    else
+        target_chunk = chunk_start_for(inst->branch_target);
+    if (!target_chunk || (target_chunk == func_start && !s_self_calls))
+        return false;
+    /* Nothing to resume into if the continuation is in another chunk. */
+    if (!branch_target_is_local(func_start, func_end, continuation))
+        return false;
+    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+    fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                dolrecomp_call_leave();\n");
+    fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n", continuation, continuation);
+    fprintf(out, "            }\n");
+    emit_exit_stat(out, "            ", "CALL_MISS");
+    fprintf(out, "            return;\n");
+    return true;
+}
+
+static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target,
+                               u32 func_start, u32 func_end) {
     bool local_backward = local_target && inst->branch_target <= inst->address;
 
     if (inst->lk) {
@@ -603,12 +794,16 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
             return;
         }
+        if ((!local_target || s_self_calls) && emit_cross_chunk_call(out, inst, func_start, func_end))
+            return;
+        emit_exit_stat(out, "            ", local_target ? "BL_LOCAL" : "BL_CROSS");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            return;\n");
         return;
     }
     /* The idle loop must keep reaching the chassis, or idle-skip dies with it. */
     if (local_backward && must_reach_dispatcher(inst->branch_target)) {
+        emit_exit_stat(out, "            ", "IDLE");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            return;\n");
         return;
@@ -627,13 +822,15 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
          * time between dispatches, never lengthens it beyond DOLRECOMP_LOOP_BUDGET
          * cycles. */
         fprintf(out, "            if (ctx->downcount <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
+        emit_exit_stat(out, "                ", "LOOP_BUDGET");
         fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "                return;\n");
         fprintf(out, "            }\n");
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
     } else if (local_target) {
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-    } else {
+    } else if (!emit_cross_chunk_tail(out, inst, func_start)) {
+        emit_exit_stat(out, "            ", "B_CROSS");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            return;\n");
     }
@@ -648,6 +845,9 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
     if (inst->lk) {
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
     }
+    emit_exit_stat(out, "            ",
+                   strstr(target_expr, "lr") ? (inst->lk ? "BLRL" : "BLR")
+                                             : (inst->lk ? "BCTRL" : "BCTR"));
     fprintf(out, "            ctx->pc = target;\n");
     fprintf(out, "            return;\n");
     fprintf(out, "        }\n");
@@ -697,6 +897,12 @@ static const char* emit_cpu_label(DolRecompCPU cpu) {
     }
 }
 
+/* Set by the DOL pre-pass when no text section contains lwarx/stwcx; written
+   into generated.h ahead of cpu.h so a DOLRECOMP_MEM_FAST module can drop the
+   reservation test. Nothing is written otherwise, so other output is unchanged. */
+static bool s_no_reservation;
+void emit_set_no_reservation(bool none) { s_no_reservation = none; }
+
 void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
     fprintf(out,
         "// DolRecomp output\n"
@@ -707,6 +913,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "\n"
         "#define DOLRECOMP_CPU_%s 1\n"
         "#define DOLRECOMP_CPU_NAME \"%s\"\n"
+        "%s"
         "\n"
         "#include <string.h>\n"
         "#include <math.h>\n"
@@ -751,6 +958,19 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "static inline f64 dolrecomp_ps_round(f64 value) {\n"
         "    PPC_PS_LANE();\n"
         "    return (f64)(f32)value;\n"
+        "}\n"
+        "\n"
+        /* The Gekko rounds a single-precision multiply's RIGHT operand to a
+           25-bit mantissa first (Dolphin: Force25Bit). A no-op on any value
+           that is already single precision -- its mantissa ends 29 bits above
+           the bottom -- so it only moves a result when a double feeds a single
+           multiply. Branchless: a branch here would add a block to every chunk
+           that multiplies, and the chunk's PGO profile would stop matching.
+           Subnormals round at the normal bit instead of being renormalised,
+           which is what Jit64 does too. */
+        "static inline f64 dolrecomp_force25(f64 value) {\n"
+        "    u64 bits = dolrecomp_f64_to_bits(value);\n"
+        "    return dolrecomp_f64_from_bits((bits & 0xFFFFFFFFF8000000ull) + (bits & 0x0000000008000000ull));\n"
         "}\n"
         "\n"
         "static inline f64 dolrecomp_ps_from_bits(u32 bits) {\n"
@@ -831,7 +1051,92 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         ,
         emit_cpu_label(cpu),
         emit_cpu_macro(cpu),
-        emit_cpu_label(cpu));
+        emit_cpu_label(cpu),
+        s_no_reservation ? "#define DOLRECOMP_DOL_NO_RESERVATION 1\n" : "");
+
+    /* Cross-chunk direct calls (--direct-calls) turn guest recursion into host
+       recursion; past the cap the call site returns to the chassis, which is
+       always correct. One counter for all chunks: it is defined in cpu.c,
+       which every module links. Not atomic: one CPU thread. Written only under
+       the flag, so a default generation stays byte-identical. */
+    if (s_direct_calls) {
+        fprintf(out,
+            "\n"
+            "#ifndef DOLRECOMP_C_MAX_CALL_DEPTH\n"
+            "#define DOLRECOMP_C_MAX_CALL_DEPTH 24\n"
+            "#endif\n"
+            "extern unsigned dolrecomp_call_depth;\n"
+            "static inline int dolrecomp_call_enter(void) {\n"
+            "    if (dolrecomp_call_depth >= (unsigned)DOLRECOMP_C_MAX_CALL_DEPTH)\n"
+            "        return 0;\n"
+            "    dolrecomp_call_depth++;\n"
+            "    return 1;\n"
+            "}\n"
+            "static inline void dolrecomp_call_leave(void) {\n"
+            "    if (dolrecomp_call_depth)\n"
+            "        dolrecomp_call_depth--;\n"
+            "}\n");
+    }
+
+    /* --exit-stats counters. The order here IS the order of the names printed
+       by the destructor in generated.c; keep both in step with emit_exit_stat. */
+    if (s_exit_stats) {
+        fprintf(out,
+            "\n"
+            "#define DOLRECOMP_EXIT_STATS 1\n"
+            "enum {\n"
+            "    DR_EXIT_BLR, DR_EXIT_BLRL, DR_EXIT_BCTR, DR_EXIT_BCTRL,\n"
+            "    DR_EXIT_BL_LOCAL, DR_EXIT_BL_CROSS, DR_EXIT_B_CROSS,\n"
+            "    DR_EXIT_LOOP_BUDGET, DR_EXIT_IDLE, DR_EXIT_CALL_MISS,\n"
+            "    DR_EXIT_SWITCH_MISS,\n"
+            "    DR_EXIT_KINDS\n"
+            "};\n"
+            /* Weak, and defined right here in the header: the counters must
+               live in a TU the module actually COMPILES. Putting them in the
+               manifest generated.c left dolrecomp_exit_counts undefined, the
+               module failed to load and the chassis rejected it. Every chunk
+               includes this header, so weak linkage collapses the 132 copies
+               into one array and one destructor -- which therefore prints the
+               table once, when the module unloads. */
+            "#include <stdio.h>\n"
+            "__attribute__((weak)) unsigned long long dolrecomp_exit_counts[DR_EXIT_KINDS];\n"
+            /* Count only returns that actually reach the chassis. Inside a
+               native call the same `return` hands control to the CALLER's C
+               frame, which is not a dispatch: counting those said 694 M exits
+               where the chassis had done 396 M dispatches, and would have
+               ranked the levers by the wrong denominator. */
+            /* dolrecomp_call_depth exists only under --direct-calls; without it
+               every return already goes to the chassis, so the test is 1. */
+            "#if defined(DOLRECOMP_C_MAX_CALL_DEPTH)\n"
+            "#define DOLRECOMP_EXIT_AT_TOP (dolrecomp_call_depth == 0u)\n"
+            "#else\n"
+            "#define DOLRECOMP_EXIT_AT_TOP 1\n"
+            "#endif\n"
+            "static inline void dolrecomp_exit_stat(int kind) {\n"
+            "    if (DOLRECOMP_EXIT_AT_TOP)\n"
+            "        dolrecomp_exit_counts[kind]++;\n"
+            "}\n"
+            "__attribute__((weak, destructor)) void dolrecomp_exit_stats_dump(void) {\n"
+            "    static int done = 0;\n"
+            "    if (done) return;\n"
+            "    done = 1;\n"
+            "    static const char* const names[DR_EXIT_KINDS] = {\n"
+            "        \"blr (return)\", \"blrl\", \"bctr (jump table)\", \"bctrl (fn pointer)\",\n"
+            "        \"bl same chunk\", \"bl cross chunk\", \"b cross chunk\",\n"
+            "        \"loop budget\", \"idle loop\", \"direct call, pc not the return\",\n"
+            "        \"entry switch: pc not in this chunk\"\n"
+            "    };\n"
+            "    unsigned long long total = 0;\n"
+            "    for (int i = 0; i < DR_EXIT_KINDS; i++) total += dolrecomp_exit_counts[i];\n"
+            "    if (!total) return;\n"
+            "    fprintf(stderr, \"[exit-stats] %%llu dispatches from the module\\n\", total);\n"
+            "    for (int i = 0; i < DR_EXIT_KINDS; i++)\n"
+            "        if (dolrecomp_exit_counts[i])\n"
+            "            fprintf(stderr, \"[exit-stats] %%-32s %%12llu  %%5.1f%%%%\\n\", names[i],\n"
+            "                    dolrecomp_exit_counts[i],\n"
+            "                    100.0 * (double)dolrecomp_exit_counts[i] / (double)total);\n"
+            "}\n");
+    }
 }
 
 void emit_header(FILE* out) {
@@ -1411,7 +1716,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_FMULS:
-        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] * ctx->fpr[%u]);\n",
+        fprintf(out, "    ctx->fpr[%u] = ctx->ps1[%u] = (f64)(f32)(ctx->fpr[%u] * dolrecomp_force25(ctx->fpr[%u]));\n",
                 inst->rD, inst->rD, inst->rA, inst->rC);
         fprintf(out, "    PPC_FPRF_TAG(0x%08Xu);\n", inst->address);
         fprintf(out, "    dolrecomp_fprf_s(ctx, (f32)ctx->fpr[%u]);\n", inst->rD);
@@ -1633,9 +1938,9 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_PS_MUL:
         fprintf(out, "    {\n");
-        fprintf(out, "        ctx->fpr[%u] = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "        ctx->fpr[%u] = dolrecomp_ps_round(ctx->fpr[%u] * dolrecomp_force25(ctx->fpr[%u]));\n",
                 inst->rD, inst->rA, inst->rC);
-        fprintf(out, "        ctx->ps1[%u] = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->ps1[%u]);\n",
+        fprintf(out, "        ctx->ps1[%u] = dolrecomp_ps_round(ctx->ps1[%u] * dolrecomp_force25(ctx->ps1[%u]));\n",
                 inst->rD, inst->rA, inst->rC);
         fprintf(out, "        PPC_FPRF_TAG(0x%08Xu);\n", inst->address);
         fprintf(out, "        dolrecomp_fprf_s(ctx, (f32)ctx->fpr[%u]);\n", inst->rD);
@@ -1750,9 +2055,9 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_PS_MULS0:
-        fprintf(out, "    { f64 d0 = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "    { f64 d0 = dolrecomp_ps_round(ctx->fpr[%u] * dolrecomp_force25(ctx->fpr[%u]));\n",
                 inst->rA, inst->rC);
-        fprintf(out, "      f64 d1 = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->fpr[%u]);\n",
+        fprintf(out, "      f64 d1 = dolrecomp_ps_round(ctx->ps1[%u] * dolrecomp_force25(ctx->fpr[%u]));\n",
                 inst->rA, inst->rC);
         fprintf(out, "      ctx->fpr[%u] = d0; ctx->ps1[%u] = d1; }\n", inst->rD, inst->rD);
         fprintf(out, "        PPC_FPRF_TAG(0x%08Xu);\n", inst->address);
@@ -1761,9 +2066,9 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_PS_MULS1:
-        fprintf(out, "    { f64 d0 = dolrecomp_ps_round((f32)ctx->fpr[%u] * (f32)ctx->ps1[%u]);\n",
+        fprintf(out, "    { f64 d0 = dolrecomp_ps_round(ctx->fpr[%u] * dolrecomp_force25(ctx->ps1[%u]));\n",
                 inst->rA, inst->rC);
-        fprintf(out, "      f64 d1 = dolrecomp_ps_round((f32)ctx->ps1[%u] * (f32)ctx->ps1[%u]);\n",
+        fprintf(out, "      f64 d1 = dolrecomp_ps_round(ctx->ps1[%u] * dolrecomp_force25(ctx->ps1[%u]));\n",
                 inst->rA, inst->rC);
         fprintf(out, "      ctx->fpr[%u] = d0; ctx->ps1[%u] = d1; }\n", inst->rD, inst->rD);
         fprintf(out, "        PPC_FPRF_TAG(0x%08Xu);\n", inst->address);
@@ -2077,7 +2382,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_B:
         fprintf(out, "    {\n");
         emit_direct_branch(out, inst,
-                           branch_target_is_local(func_start, func_end, inst->branch_target));
+                           branch_target_is_local(func_start, func_end, inst->branch_target),
+                           func_start, func_end);
         fprintf(out, "    }\n");
         break;
 
@@ -2086,7 +2392,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         emit_branch_condition(out, inst->bo, inst->bi);
         fprintf(out, "        if (ctr_ok && cr_ok) {\n");
         emit_direct_branch(out, inst,
-                           branch_target_is_local(func_start, func_end, inst->branch_target));
+                           branch_target_is_local(func_start, func_end, inst->branch_target),
+                           func_start, func_end);
         fprintf(out, "        }\n");
         fprintf(out, "    }\n");
         break;
@@ -2593,7 +2900,7 @@ void emit_collect_entry_points(const PPCInst* insts, u32 count, u32 func_addr) {
         return;
     compute_leaders(insts, count, func_addr, leader);
     for (i = 0; i < count; i++) {
-        if (leader[i])
+        if (leader[i] || is_extra_entry(&insts[i]))
             record_entry(insts[i].address);
     }
     free(leader);
@@ -2652,14 +2959,24 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     }
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    /* Not worth lowering differently: an index switch with every index a case
+       (one jump table instead of clang's compare tree) measured -0.04% cycles
+       on the US disc. The entry cost is the indirect jump and the prologue. */
     fprintf(out, "    switch (ctx->pc) {\n");
     for (i = 0; i < count; i++) {
-        if (s_leader_cases && !leader[i])
+        if (s_leader_cases && !leader[i] && !is_extra_entry(&insts[i]))
             continue;
         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
                 insts[i].address, insts[i].address);
     }
-    fprintf(out, "    default: return;\n");
+    /* The switch's own default is an exit too, and under --call-resume it is
+       where a re-entry that does not belong to this chunk ends up. Leaving it
+       uncounted hid ~49 M dispatches: the instrumented total fell while the
+       chassis kept dispatching just as often. */
+    if (s_exit_stats)
+        fprintf(out, "    default: dolrecomp_exit_stat(DR_EXIT_SWITCH_MISS); return;\n");
+    else
+        fprintf(out, "    default: return;\n");
     fprintf(out, "    }\n");
 
     for (i = 0; i < count; i++) {

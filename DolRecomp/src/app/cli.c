@@ -17,8 +17,13 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
-    fprintf(stderr, "  --leader-cases                 Entry switch at block leaders only (EXPERIMENT)\n");
-    fprintf(stderr, "  --ca-liveness                  Report provably-dead XER[CA] writes (codegen unchanged)\n");
+    fprintf(stderr, "  --leader-cases                 Reduced entry switch: leaders + FP-guard sites + program-wide\n");
+    fprintf(stderr, "                                 branch/data targets (hash-clean, -8%% cycles; DOL input)\n");
+    fprintf(stderr, "  --direct-calls                 Call across chunks natively instead of via the chassis\n");
+    fprintf(stderr, "                                 (changes guest timing; pass every hooked PC as --dispatch-pc)\n");
+    fprintf(stderr, "  --self-calls                   With --direct-calls: same-chunk bl also calls natively\n");
+    fprintf(stderr, "  --tail-calls                   With --direct-calls: cross-chunk b calls natively\n");
+    fprintf(stderr, "  --exit-stats                   Diagnostic: count dispatches by cause (blr/bctr/...)\n");    fprintf(stderr, "  --ca-liveness                  Report provably-dead XER[CA] writes (codegen unchanged)\n");
     fprintf(stderr, "  --ca-elide                     UNSOUND, do not ship: elide dead XER[CA] writes\n");
     fprintf(stderr, "                                 (diverges at frame 465 of arcade-match; worth 0.4-0.7%%)\n");
     fprintf(stderr, "  --backend <c|llvm>            Code generator; c (default) or the LLVM object backend\n"
@@ -166,6 +171,25 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--direct-calls") == 0) {
+            opts->direct_calls = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--self-calls") == 0) {
+            opts->self_calls = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--tail-calls") == 0) {
+            opts->tail_calls = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--exit-stats") == 0) {
+            opts->exit_stats = 1;
+            continue;
+        }
         if (strcmp(arg, "--ca-elide") == 0) {
             opts->ca_elide = 1;
             continue;

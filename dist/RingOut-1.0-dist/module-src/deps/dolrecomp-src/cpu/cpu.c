@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 ExpansionPak
 
+/* This file defines the out-of-line psq functions; skip the chunk fast paths. */
+#define DOLRECOMP_PSQ_OUT_OF_LINE
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,6 +150,11 @@ PPC_MODULE_EXPORT void ppc_set_mem_write_journal(PPCMemWriteJournal fn,
                                                                       void* user) {
     g_mem_write_journal = fn;
     g_mem_write_journal_user = user;
+#if defined(DOLRECOMP_MEM_FAST)
+    if (fn)
+        fprintf(stderr, "[dolrecomp] write journal requested, but this module was built with "
+                        "MODULE_MEM_FAST: recompiled RAM writes are not journalled\n");
+#endif
 }
 static inline void ppc_journal_ram_write(CPUState* cpu, const u8* host, u32 size) {
     if (g_mem_write_journal && host >= cpu->ram && host < cpu->ram + cpu->ram_size)
@@ -847,7 +854,7 @@ DOLRECOMP_PSQ_FI bool psq_check_enabled(CPUState* cpu, bool indexed, u32 cia) {
     return true;
 }
 
-bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+bool ppc_psq_load_full(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
     if (!psq_check_enabled(cpu, indexed, cia))
         return false;
 
@@ -870,7 +877,7 @@ bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool inde
     return true;
 }
 
-bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+bool ppc_psq_store_full(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
     if (!psq_check_enabled(cpu, indexed, cia))
         return false;
 
@@ -889,6 +896,19 @@ bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool ind
         psq_store_value(cpu, ps1_ea, type, scale, cpu->ps1[frS]);
     }
     return true;
+}
+
+/* Real symbols under the original names, for callers that link against them
+ * (the LLVM backend). Recompiled chunks see the inline fast paths in cpu.h
+ * instead, which call the _full versions only off the common path. */
+#undef ppc_psq_load
+#undef ppc_psq_store
+bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    return ppc_psq_load_full(cpu, frD, ea, w, gqr_index, indexed, cia);
+}
+
+bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    return ppc_psq_store_full(cpu, frS, ea, w, gqr_index, indexed, cia);
 }
 
 void ppc_rfi(CPUState* cpu, u32 cia) {

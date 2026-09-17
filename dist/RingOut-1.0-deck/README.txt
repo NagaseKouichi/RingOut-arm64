@@ -161,6 +161,9 @@ BUILDING ON THE DECK ITSELF (no second machine)
     ./tools/dolrecomp extract /path/to/disc.iso ./game
     ./tools/dolrecomp --gamecube ./game/sys/main.dol --idle-pc auto \
         -j$(nproc) ./work/out
+
+  (US disc, GRSEAF, only: add --leader-cases to that second line. The US
+  profile is trained with it; every other disc's profile is not.)
     cp ./game/sys/main.dol ./work/out/generated/main.dol
 
   If that first line says "unsupported format", your image is .rvz, .gcz or
