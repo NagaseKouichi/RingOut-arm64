@@ -77,6 +77,18 @@ if(MODULE_MEM_FAST)
   target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_MEM_FAST)
 endif()
 
+# Cache ctx->ram in a chunk-entry local (cpu.h DOLRECOMP_RAM_LOCAL). A store
+# through ctx->ram may alias the CPUState fields, so clang reloads the pointer
+# on every access -- 999 reloads against ~999 accesses in the hottest chunk.
+# The chunk prologue the recompiler emits declares the local; with this OFF the
+# macro is a no-op and accesses read ctx->ram as before, so one generated tree
+# serves both. ON by default: measured -1.18% cycles, -1.63% instructions and
+# -4.1% .text on the US disc, frame hash unchanged.
+option(MODULE_RAM_LOCAL "Cache ctx->ram in a chunk-entry local" ON)
+if(MODULE_RAM_LOCAL)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_RAM_LOCAL_ENABLE)
+endif()
+
 target_include_directories(${MODULE_NAME} PRIVATE
   "${GENERATED_DIR}"
   "${DOLRECOMP_SRC}"

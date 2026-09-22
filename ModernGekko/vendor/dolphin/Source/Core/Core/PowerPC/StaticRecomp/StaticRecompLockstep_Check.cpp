@@ -234,7 +234,7 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
     }
     addu("lr", m_core.m_guest.lr, ppc.spr[SPR_LR]);
     addu("ctr", m_core.m_guest.ctr, ppc.spr[SPR_CTR]);
-    addu("cr", m_core.m_guest.cr, ppc.cr.Get());
+    addu("cr", cpu_cr_get(&m_core.m_guest), ppc.cr.Get());
     addu("xer", m_core.m_guest.xer, ppc.GetXER().Hex);
     addu("fpscr", m_core.m_guest.fpscr, ppc.fpscr.Hex);
     addu("msr", m_core.m_guest.msr, ppc.msr.Hex);

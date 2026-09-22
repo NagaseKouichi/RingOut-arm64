@@ -4,6 +4,7 @@
 #include "Core/Boot/DolReader.h"
 #include "moderngekko/interpreter.hpp"
 
+#include <cstdio>
 #include <limits>
 
 namespace moderngekko
@@ -19,8 +20,30 @@ LegacyRuntime::LegacyRuntime(bool enable_mem2)
   Reset();
 }
 
+namespace
+{
+// A module bounds-checks its inlined memory fast paths against the
+// compile-time GC_MAIN_RAM_SIZE (== RetailMem1Size), not cpu->ram_size, so it
+// is only safe to run while MEM1 is at least retail size; below that, an
+// access the fast path accepts lands past the end of the allocation. Larger
+// is fine: the bound is then conservative and slow paths still use ram_size.
+bool Mem1FitsModuleFastPaths(std::uint32_t ram_size)
+{
+  if (ram_size >= AddressSpace::RetailMem1Size)
+    return true;
+  std::fprintf(stderr,
+               "[moderngekko] module rejected: MEM1 %u bytes < %u assumed by its memory "
+               "fast paths\n",
+               ram_size, static_cast<unsigned>(AddressSpace::RetailMem1Size));
+  return false;
+}
+}  // namespace
+
 ModuleLoadResult LegacyRuntime::LoadModule(const std::string& path, const std::string& game_id)
 {
+  if (!Mem1FitsModuleFastPaths(m_cpu.ram_size))
+    return {ModuleLoadStatus::DescriptorRejected, MODERNGEKKO_MODULE_RAM_TOO_SMALL};
+
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION,
       static_cast<std::uint32_t>(sizeof(CPUState)),
@@ -39,6 +62,9 @@ ModuleLoadResult LegacyRuntime::LoadModule(const std::string& path, const std::s
 ModuleLoadResult LegacyRuntime::AttachModule(const ModernGekkoModuleDesc* descriptor,
                                        const std::string& game_id)
 {
+  if (!Mem1FitsModuleFastPaths(m_cpu.ram_size))
+    return {ModuleLoadStatus::DescriptorRejected, MODERNGEKKO_MODULE_RAM_TOO_SMALL};
+
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION,
       static_cast<std::uint32_t>(sizeof(CPUState)),

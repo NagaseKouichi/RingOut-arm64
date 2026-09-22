@@ -19,7 +19,7 @@ void StaticRecompCore::SetPPCStateFromGuestState(const CPUState& s, PowerPC::Pow
   ppc.npc = s.pc;
   ppc.spr[SPR_LR] = s.lr;
   ppc.spr[SPR_CTR] = s.ctr;
-  ppc.cr.Set(s.cr);
+  ppc.cr.Set(cpu_cr_get(&s));
   ppc.SetXER(UReg_XER{s.xer});
   ppc.fpscr.Hex = s.fpscr;
   ppc.spr[SPR_SRR0] = s.srr0;
@@ -50,7 +50,7 @@ void StaticRecompCore::SyncIn()
   m_guest.pc = ppc.pc;
   m_guest.lr = ppc.spr[SPR_LR];
   m_guest.ctr = ppc.spr[SPR_CTR];
-  m_guest.cr = ppc.cr.Get();
+  cpu_cr_set(&m_guest, ppc.cr.Get());
   m_guest.xer = ppc.GetXER().Hex;
   m_guest.fpscr = ppc.fpscr.Hex;
   m_guest.msr = ppc.msr.Hex;

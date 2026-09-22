@@ -27,7 +27,7 @@
 //   consumes and resets it (Dolphin chassis: per-dispatch flush into
 //   ppc_state.downcount). Hosts that do not meter guest time may ignore it
 //   (s64: it cannot wrap in any realistic session).
-#define GXRUNTIME_CPU_ABI_VERSION 3u
+#define GXRUNTIME_CPU_ABI_VERSION 4u
 #define GXRUNTIME_CPU_ABI_DOLRECOMP_PREFIX 1u
 #define GXRUNTIME_CPU_ABI_EXTERNAL_POINTER_EXTENSION 1u
 
@@ -101,7 +101,7 @@ struct CPUState {
     u32 pc;
     u32 lr;
     u32 ctr;
-    u32 cr;
+    u8 crf[8];   /* unpacked CR, see cpu_cr_get */
     u32 xer;
     u32 fpscr;
     u32 msr;
@@ -143,6 +143,24 @@ struct CPUState {
     u32 mem2_size;
     s64 downcount;
 };
+
+/* The CR is stored UNPACKED, one byte per field (crf[0] is CR0, the top
+ * nibble of the architectural register), each holding LT/GT/EQ/SO as
+ * 8/4/2/1. A field write is then one byte store instead of a
+ * read-modify-write of a packed word -- the packed form cost 8.75% of the
+ * gameplay profile. Only mfcr/mtcrf and the chassis sync need the packed
+ * value, and they go through these two. ABI v4. */
+static inline uint32_t cpu_cr_get(const CPUState* cpu) {
+    uint32_t cr = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        cr |= (uint32_t)(cpu->crf[i] & 0xFu) << (28u - 4u * i);
+    return cr;
+}
+
+static inline void cpu_cr_set(CPUState* cpu, uint32_t cr) {
+    for (unsigned i = 0; i < 8; ++i)
+        cpu->crf[i] = (uint8_t)((cr >> (28u - 4u * i)) & 0xFu);
+}
 
 #include <stdio.h>
 

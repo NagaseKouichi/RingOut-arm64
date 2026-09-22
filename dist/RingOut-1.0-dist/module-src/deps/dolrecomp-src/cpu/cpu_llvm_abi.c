@@ -81,13 +81,12 @@ void ppc_ps_mul_op(CPUState* cpu, u8 d, u8 a, u8 c) {
 // than silently changing behaviour between backends.
 void ppc_fcmp(CPUState* cpu, u8 crfd, f64 val_a, f64 val_b, bool ordered) {
     (void)ordered;
-    const u32 shift = (7u - (crfd & 7u)) * 4u;
     u32 cr_bits;
     if (val_a < val_b)       cr_bits = 0x8u;
     else if (val_a > val_b)  cr_bits = 0x4u;
     else if (val_a == val_b) cr_bits = 0x2u;
     else                     cr_bits = 0x1u;
-    cpu->cr = (cpu->cr & ~(0xFu << shift)) | (cr_bits << shift);
+    cpu->crf[crfd & 7u] = (u8)cr_bits;
     cpu->fpscr = (cpu->fpscr & ~(0xFu << 12)) | (cr_bits << 12);
 }
 

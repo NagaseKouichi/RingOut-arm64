@@ -19,7 +19,11 @@ typedef enum ModernGekkoModuleStatus
     MODERNGEKKO_MODULE_INVALID_CODE_RANGES,
     MODERNGEKKO_MODULE_INVALID_SMC_RANGES,
     MODERNGEKKO_MODULE_INVALID_CHUNKS,
-    MODERNGEKKO_MODULE_ENTRY_POINT_UNCOVERED
+    MODERNGEKKO_MODULE_ENTRY_POINT_UNCOVERED,
+    // MEM1 is smaller than the GC_MAIN_RAM_SIZE the module's memory fast
+    // paths bounds-check against, so running it could write past the RAM
+    // allocation. Appended, never renumbered: modules see this enum too.
+    MODERNGEKKO_MODULE_RAM_TOO_SMALL
 } ModernGekkoModuleStatus;
 
 typedef struct ModernGekkoModuleRequirements

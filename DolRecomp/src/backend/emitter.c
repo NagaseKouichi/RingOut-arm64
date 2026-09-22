@@ -109,18 +109,16 @@ static void emit_set_cr0_from_gpr(FILE* out, u8 reg) {
     fprintf(out, "        if (cr_value > 0)  cr_bits |= 0x4u;\n");
     fprintf(out, "        if (cr_value == 0) cr_bits |= 0x2u;\n");
     fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
-    fprintf(out, "        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);\n");
+    fprintf(out, "        ctx->crf[0] = (u8)cr_bits;\n");
     fprintf(out, "        PPC_CR_WRITE(0);\n");
 }
 
 static void emit_set_cr1_from_fpscr(FILE* out) {
-    fprintf(out, "        ctx->cr = (ctx->cr & 0xF0FFFFFFu) | ((ctx->fpscr >> 4) & 0x0F000000u);\n");
+    fprintf(out, "        ctx->crf[1] = (u8)(ctx->fpscr >> 28);\n");
     fprintf(out, "        PPC_CR_WRITE(1);\n");
 }
 
 static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
-    u32 shift = cr_field_shift(crf);
-
     fprintf(out, "    {\n");
     fprintf(out, "        s32 val_a = (s32)(%s);\n", lhs);
     fprintf(out, "        s32 val_b = (s32)(%s);\n", rhs);
@@ -129,15 +127,12 @@ static void emit_compare_s32(FILE* out, u8 crf, const char* lhs, const char* rhs
     fprintf(out, "        if (val_a > val_b)  cr_bits |= 0x4u;\n");
     fprintf(out, "        if (val_a == val_b) cr_bits |= 0x2u;\n");
     fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
-    fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
-            shift, shift);
+    fprintf(out, "        ctx->crf[%u] = (u8)cr_bits;\n", (u32)crf);
     fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)crf);
     fprintf(out, "    }\n");
 }
 
 static void emit_compare_u32(FILE* out, u8 crf, const char* lhs, const char* rhs) {
-    u32 shift = cr_field_shift(crf);
-
     fprintf(out, "    {\n");
     fprintf(out, "        u32 val_a = (u32)(%s);\n", lhs);
     fprintf(out, "        u32 val_b = (u32)(%s);\n", rhs);
@@ -146,15 +141,12 @@ static void emit_compare_u32(FILE* out, u8 crf, const char* lhs, const char* rhs
     fprintf(out, "        if (val_a > val_b)  cr_bits |= 0x4u;\n");
     fprintf(out, "        if (val_a == val_b) cr_bits |= 0x2u;\n");
     fprintf(out, "        cr_bits |= (ctx->xer >> 31) & 1u;\n");
-    fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
-            shift, shift);
+    fprintf(out, "        ctx->crf[%u] = (u8)cr_bits;\n", (u32)crf);
     fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)crf);
     fprintf(out, "    }\n");
 }
 
 static void emit_fcompare(FILE* out, const PPCInst* inst) {
-    u32 shift = cr_field_shift(inst->crfD);
-
     fprintf(out, "    {\n");
     fprintf(out, "        f64 val_a = ctx->fpr[%u];\n", inst->rA);
     fprintf(out, "        f64 val_b = ctx->fpr[%u];\n", inst->rB);
@@ -163,8 +155,7 @@ static void emit_fcompare(FILE* out, const PPCInst* inst) {
     fprintf(out, "        else if (val_a > val_b)  cr_bits = 0x4u;\n");
     fprintf(out, "        else if (val_a == val_b) cr_bits = 0x2u;\n");
     fprintf(out, "        else                     cr_bits = 0x1u;\n");
-    fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
-            shift, shift);
+    fprintf(out, "        ctx->crf[%u] = (u8)cr_bits;\n", (u32)inst->crfD);
     fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)inst->crfD);
     /* A FLOAT compare also sets FPSCR's FPCC (bits 12-15); nothing was doing
      * that, so lockstep saw the interpreter carrying compare results in FPSCR
@@ -401,10 +392,9 @@ static void emit_branch_condition(FILE* out, u8 bo, u8 bi) {
     }
 
     if (!cond_ignored) {
-        u32 mask = 0x80000000u >> bi;
         fprintf(out, "        PPC_CR_READ(%uu);\n", 1u << (bi >> 2));
-        fprintf(out, "        bool cr_ok = (((ctx->cr & 0x%08Xu) != 0) == %s);\n",
-                mask, ((bo >> 3) & 1u) ? "true" : "false");
+        fprintf(out, "        bool cr_ok = (((ctx->crf[%u] & 0x%Xu) != 0) == %s);\n",
+                (u32)(bi >> 2), 8u >> (bi & 3u), ((bo >> 3) & 1u) ? "true" : "false");
     } else {
         fprintf(out, "        bool cr_ok = true;\n");
     }
@@ -858,11 +848,12 @@ static void emit_cr_logical(FILE* out, const PPCInst* inst, const char* expr) {
     fprintf(out, "    {\n");
     fprintf(out, "        PPC_CR_READ(%uu);\n",
             (1u << (inst->rA >> 2)) | (1u << (inst->rB >> 2)));
-    fprintf(out, "        u32 a = (ctx->cr >> (31u - %uu)) & 1u;\n", inst->rA);
-    fprintf(out, "        u32 b = (ctx->cr >> (31u - %uu)) & 1u;\n", inst->rB);
-    fprintf(out, "        u32 mask = 0x80000000u >> %u;\n", inst->rD);
+    fprintf(out, "        u32 a = (ctx->crf[%u] >> %uu) & 1u;\n", inst->rA >> 2, 3u - (inst->rA & 3u));
+    fprintf(out, "        u32 b = (ctx->crf[%u] >> %uu) & 1u;\n", inst->rB >> 2, 3u - (inst->rB & 3u));
+    fprintf(out, "        u32 mask = 0x%Xu;\n", 8u >> (inst->rD & 3u));
     fprintf(out, "        u32 value = (%s) & 1u;\n", expr);
-    fprintf(out, "        ctx->cr = (ctx->cr & ~mask) | (value ? mask : 0u);\n");
+    fprintf(out, "        ctx->crf[%u] = (u8)((ctx->crf[%u] & ~mask) | (value ? mask : 0u));\n",
+            inst->rD >> 2, inst->rD >> 2);
     fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)(inst->rD >> 2));
     fprintf(out, "    }\n");
 }
@@ -1877,14 +1868,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MCRFS: {
         u32 shift = cr_field_shift(inst->crfS);
-        u32 dst_shift = cr_field_shift(inst->crfD);
         fprintf(out, "    {\n");
         fprintf(out, "        PPC_FPRF_READ();\n");
         fprintf(out, "        ppc_fprf_flush(ctx);\n");
         fprintf(out, "        u32 field = (ctx->fpscr >> %u) & 0xFu;\n", shift);
         fprintf(out, "        ctx->fpscr &= ~((0xFu << %u) & 0x83F80700u);\n", shift);
         fprintf(out, "        ppc_fpscr_updated(ctx);\n");
-        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (field << %u);\n", dst_shift, dst_shift);
+        fprintf(out, "        ctx->crf[%u] = (u8)field;\n", (u32)inst->crfD);
         fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)inst->crfD);
         fprintf(out, "    }\n");
         break;
@@ -2143,8 +2133,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        else if (val_a > val_b)  cr_bits = 0x4u;\n");
         fprintf(out, "        else if (val_a == val_b) cr_bits = 0x2u;\n");
         fprintf(out, "        else                     cr_bits = 0x1u;\n");
-        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (cr_bits << %u);\n",
-                cr_field_shift(inst->crfD), cr_field_shift(inst->crfD));
+        fprintf(out, "        ctx->crf[%u] = (u8)cr_bits;\n", (u32)inst->crfD);
         fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)inst->crfD);
         fprintf(out, "    }\n");
         break;
@@ -2311,7 +2300,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, ";\n        bool success = ctx->reserve_valid;\n");
         fprintf(out, "        ctx->reserve_valid = false;\n");
         fprintf(out, "        if (success) mem_write32(ctx, ea, ctx->gpr[%u]);\n", inst->rS);
-        fprintf(out, "        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | ((success ? 2u : 0u) << 28) | ((ctx->xer >> 3) & 0x10000000u);\n");
+        fprintf(out, "        ctx->crf[0] = (u8)((success ? 2u : 0u) | (ctx->xer >> 31));\n");
         fprintf(out, "        PPC_CR_WRITE(0);\n");
         fprintf(out, "    }\n");
         break;
@@ -2442,25 +2431,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_CRXOR:  emit_cr_logical(out, inst, "a ^ b"); break;
 
     case PPC_OP_MCRF: {
-        u32 dst_shift = cr_field_shift(inst->crfD);
-        u32 src_shift = cr_field_shift(inst->crfS);
         fprintf(out, "    {\n");
         fprintf(out, "        PPC_CR_READ(%uu);\n", 1u << inst->crfS);
-        fprintf(out, "        u32 bits = (ctx->cr >> %u) & 0xFu;\n", src_shift);
-        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (bits << %u);\n",
-                dst_shift, dst_shift);
+        fprintf(out, "        ctx->crf[%u] = ctx->crf[%u];\n", (u32)inst->crfD, (u32)inst->crfS);
         fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)inst->crfD);
         fprintf(out, "    }\n");
         break;
     }
 
     case PPC_OP_MCRXR: {
-        u32 dst_shift = cr_field_shift(inst->crfD);
         fprintf(out, "    {\n");
         fprintf(out, "        PPC_CA_READ();\n");
-        fprintf(out, "        u32 bits = (ctx->xer >> 28) & 0xFu;\n");
-        fprintf(out, "        ctx->cr = (ctx->cr & ~(0xFu << %u)) | (bits << %u);\n",
-                dst_shift, dst_shift);
+        fprintf(out, "        ctx->crf[%u] = (u8)(ctx->xer >> 28);\n", (u32)inst->crfD);
         fprintf(out, "        PPC_CR_WRITE(%u);\n", (u32)inst->crfD);
         fprintf(out, "        ctx->xer &= ~0xE0000000u;\n");
         fprintf(out, "    }\n");
@@ -2469,18 +2451,15 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MFCR:
         fprintf(out, "    PPC_CR_READ(0xFFu);\n");
-        fprintf(out, "    ctx->gpr[%u] = ctx->cr;\n", inst->rD);
+        fprintf(out, "    ctx->gpr[%u] = cpu_cr_get(ctx);\n", inst->rD);
         break;
 
     case PPC_OP_MTCRF: {
-        u32 mask = 0;
-        for (u32 crf = 0; crf < 8; crf++) {
-            if (inst->crm & (0x80u >> crf))
-                mask |= 0xFu << cr_field_shift((u8)crf);
-        }
-        if (mask) {
-            fprintf(out, "    ctx->cr = (ctx->cr & ~0x%08Xu) | (ctx->gpr[%u] & 0x%08Xu);\n",
-                    mask, inst->rS, mask);
+        if (inst->crm & 0xFFu) {
+            for (u32 crf = 0; crf < 8; crf++)
+                if (inst->crm & (0x80u >> crf))
+                    fprintf(out, "    ctx->crf[%u] = (u8)((ctx->gpr[%u] >> %u) & 0xFu);\n",
+                            crf, inst->rS, cr_field_shift((u8)crf));
             for (u32 crf = 0; crf < 8; crf++)
                 if (inst->crm & (0x80u >> crf))
                     fprintf(out, "    PPC_CR_WRITE(%u);\n", crf);
@@ -2959,6 +2938,10 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     }
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    /* Caches ctx->ram in a local for the whole chunk. Expands to nothing unless
+       the module is built with MODULE_RAM_LOCAL, so the same generated tree
+       builds both arms of the A/B (see DOLRECOMP_RAM_LOCAL in cpu.h). */
+    fprintf(out, "    DOLRECOMP_RAM_LOCAL(ctx);\n");
     /* Not worth lowering differently: an index switch with every index a case
        (one jump table instead of clang's compare tree) measured -0.04% cycles
        on the US disc. The entry cost is the indirect jump and the prologue. */

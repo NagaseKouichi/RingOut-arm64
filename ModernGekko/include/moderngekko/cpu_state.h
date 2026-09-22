@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MODERNGEKKO_CPU_ABI_VERSION 3u
+#define MODERNGEKKO_CPU_ABI_VERSION 4u
 #define GXRUNTIME_CPU_ABI_VERSION MODERNGEKKO_CPU_ABI_VERSION
 
 typedef struct CPUState CPUState;
@@ -30,7 +30,7 @@ struct CPUState
     uint32_t pc;
     uint32_t lr;
     uint32_t ctr;
-    uint32_t cr;
+    uint8_t crf[8];   /* unpacked CR, see cpu_cr_get */
     uint32_t xer;
     uint32_t fpscr;
     uint32_t msr;
@@ -71,6 +71,24 @@ struct CPUState
     uint32_t mem2_size;
     int64_t downcount;
 };
+
+/* The CR is stored UNPACKED, one byte per field (crf[0] is CR0, the top
+ * nibble of the architectural register), each holding LT/GT/EQ/SO as
+ * 8/4/2/1. A field write is then one byte store instead of a
+ * read-modify-write of a packed word -- the packed form cost 8.75% of the
+ * gameplay profile. Only mfcr/mtcrf and the chassis sync need the packed
+ * value, and they go through these two. ABI v4. */
+static inline uint32_t cpu_cr_get(const CPUState* cpu) {
+    uint32_t cr = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        cr |= (uint32_t)(cpu->crf[i] & 0xFu) << (28u - 4u * i);
+    return cr;
+}
+
+static inline void cpu_cr_set(CPUState* cpu, uint32_t cr) {
+    for (unsigned i = 0; i < 8; ++i)
+        cpu->crf[i] = (uint8_t)((cr >> (28u - 4u * i)) & 0xFu);
+}
 
 #ifdef __cplusplus
 }

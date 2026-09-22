@@ -18,13 +18,13 @@ namespace
 PowerPC::ConditionRegister LoadConditionRegister(const CPUState& cpu)
 {
   PowerPC::ConditionRegister condition_register{};
-  condition_register.Set(cpu.cr);
+  condition_register.Set(cpu_cr_get(&cpu));
   return condition_register;
 }
 
 void StoreConditionRegister(CPUState& cpu, const PowerPC::ConditionRegister& condition_register)
 {
-  cpu.cr = condition_register.Get();
+  cpu_cr_set(&cpu, condition_register.Get());
 }
 
 bool GetSummaryOverflow(const CPUState& cpu)

@@ -15,6 +15,7 @@
 #include "Core/RecompDeterminism.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/ConfigManager.h"
+#include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
 
 #include <algorithm>
@@ -603,14 +604,38 @@ void StaticRecompCore::Run()
   m_guest.mem2_size = memory.GetExRamSizeReal();
   InitLookupTable(m_guest.ram_size, m_guest.mem2_size);
 
+  // The module's inlined memory fast paths bounds-check the cached-RAM window
+  // against the compile-time GC_MAIN_RAM_SIZE, not m_guest.ram_size, so they are
+  // in bounds only while MEM1 is at least retail size. With
+  // MAIN_RAM_OVERRIDE_ENABLE and a smaller MAIN_MEM1_SIZE, a guest access the
+  // fast path accepts would land past the end of the allocation -- silent host
+  // heap corruption, because nothing downstream re-checks. A LARGER MEM1 is
+  // safe: the constant bound is merely conservative and the out-of-line paths
+  // still use ram_size. Refuse the module; the fallback JIT below runs instead.
+  static_assert(static_cast<u32>(GC_MAIN_RAM_SIZE) == Memory::MEM1_SIZE_RETAIL,
+                "module memory fast paths assume retail MEM1");
+  const bool mem1_fits_module = m_guest.ram_size >= static_cast<u32>(GC_MAIN_RAM_SIZE);
+  if (m_module && !mem1_fits_module)
+  {
+    ERROR_LOG_FMT(POWERPC,
+                  "StaticRecomp: MEM1 is {} bytes, below the {} the module's memory fast paths "
+                  "assume; module disabled (turn off the RAM override to use it).",
+                  m_guest.ram_size, static_cast<u32>(GC_MAIN_RAM_SIZE));
+    std::fprintf(stderr,
+                 "[staticrecomp] module disabled: MEM1 %u bytes < %u assumed by the module's "
+                 "memory fast paths (RAM override?)\n",
+                 m_guest.ram_size, static_cast<unsigned>(GC_MAIN_RAM_SIZE));
+  }
+
   const std::string initial_game_id = SConfig::GetInstance().GetGameID();
-  m_module_active = m_module && (initial_game_id.empty() || initial_game_id == m_module->game_id);
+  m_module_active = mem1_fits_module && m_module &&
+                    (initial_game_id.empty() || initial_game_id == m_module->game_id);
 
   if (getenv("STATICRECOMP_DEBUG_ID"))
   {
-    fprintf(stderr, "[dbg] disc_game_id='%s' module_game_id='%s' module=%p active=%d\n",
+    fprintf(stderr, "[dbg] disc_game_id='%s' module_game_id='%s' module=%p active=%d ram_size=%u\n",
             initial_game_id.c_str(), m_module ? m_module->game_id : "(null)", (void*)m_module,
-            (int)m_module_active);
+            (int)m_module_active, m_guest.ram_size);
     fflush(stderr);
   }
 
@@ -657,7 +682,8 @@ void StaticRecompCore::Run()
     if (m_watch_armed)
       PollDeterminismWatch("coretiming", ppc.pc);
     const std::string current_game_id = SConfig::GetInstance().GetGameID();
-    m_module_active = m_module && (current_game_id.empty() || current_game_id == m_module->game_id);
+    m_module_active = mem1_fits_module && m_module &&
+                      (current_game_id.empty() || current_game_id == m_module->game_id);
 
     do
     {

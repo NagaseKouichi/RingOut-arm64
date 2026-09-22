@@ -794,6 +794,7 @@ static inline f64 psq_pow2i(s32 e) {
 }
 
 DOLRECOMP_PSQ_FI f64 psq_load_value(CPUState* cpu, u32 ea, u8 type, s32 scale) {
+    DOLRECOMP_RAM_LOCAL(cpu);
     switch (type) {
     case 0:
         return (f64)f32_value(mem_read32(cpu, ea));
@@ -825,6 +826,7 @@ static s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale) 
 }
 
 DOLRECOMP_PSQ_FI void psq_store_value(CPUState* cpu, u32 ea, u8 type, s32 scale, f64 value) {
+    DOLRECOMP_RAM_LOCAL(cpu);
     switch (type) {
     case 0: {
         f32 single = (f32)value;
@@ -923,6 +925,7 @@ void ppc_rfi(CPUState* cpu, u32 cia) {
 }
 
 void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia) {
+    DOLRECOMP_RAM_LOCAL(cpu);
     if (cpu->msr & PPC_MSR_PR) {
         ppc_program_exception(cpu, PPC_PROGRAM_PRIV, cia);
         return;
