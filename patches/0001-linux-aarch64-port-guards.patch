@@ -1,30 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: RingOut aarch64 port <local>
-Date: Sun, 6 Sep 2026 +0000
 Subject: [PATCH] linux aarch64: guard x86-only fmod pin, --deck, PGO, glibc fallback
 
-Against jackpoison-prog/RingOut v1.5.2 (050eccd0).
+Against jackpoison-prog/RingOut v1.6.3 (ceda43f4).
 
-Four files, +23/-5. Does not change the runtime or Dolphin vendor.
-Apply from the repo root:
+Four first-party portability guards. This does not modify ModernGekko or the
+vendored Dolphin runtime. Apply from the repo root:
 
   git apply --check patches/0001-linux-aarch64-port-guards.patch
   git apply patches/0001-linux-aarch64-port-guards.patch
 
-Or:  patch -p1 < 0001-linux-aarch64-port-guards.patch
-
 ---
- DolRecomp/src/cpu/cpu.c                                 |  4 +++-
- dist/RingOut-1.0-dist/RingOut                           |  3 ++-
- .../module-src/deps/dolrecomp-src/cpu/cpu.c             |  4 +++-
- dist/RingOut-1.0-dist/setup.sh                          | 17 +++++++++++++++--
- 4 files changed, 23 insertions(+), 5 deletions(-)
 
-diff --git a/DolRecomp/src/cpu/cpu.c b/DolRecomp/src/cpu/cpu.c
-index b07a582c..35632dd1 100644
+index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c3363cee51b4 100644
 --- a/DolRecomp/src/cpu/cpu.c
 +++ b/DolRecomp/src/cpu/cpu.c
-@@ -37,7 +37,9 @@
+@@ -43,7 +43,9 @@
  // unnoticed because the shipped binary predates it and install(1) re-stamped its
  // mtime, so it looked current. The pin is only ever needed for the module, which
  // is the thing that gets dlopened on a Deck.
@@ -36,7 +27,7 @@ index b07a582c..35632dd1 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/RingOut b/dist/RingOut-1.0-dist/RingOut
-index 979a63b8..86f2d530 100755
+index 979a63b8f3cb199807d0938a337e265cf9c414c9..86f2d530bd69176b4ed419b22b7afbe812a56005 100755
 --- a/dist/RingOut-1.0-dist/RingOut
 +++ b/dist/RingOut-1.0-dist/RingOut
 @@ -282,7 +282,8 @@ NEED_GLIBC=2.36
@@ -50,10 +41,10 @@ index 979a63b8..86f2d530 100755
      echo "Ring Out: host glibc $host_glibc is older than $NEED_GLIBC - using bundled glibc." >&2
      # $LIB_PATH, not $HERE/lib: on this path the bundled glibc genuinely has to
 diff --git a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
-index b07a582c..35632dd1 100644
+index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c3363cee51b4 100644
 --- a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
 +++ b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
-@@ -37,7 +37,9 @@
+@@ -43,7 +43,9 @@
  // unnoticed because the shipped binary predates it and install(1) re-stamped its
  // mtime, so it looked current. The pin is only ever needed for the module, which
  // is the thing that gets dlopened on a Deck.
@@ -65,7 +56,7 @@ index b07a582c..35632dd1 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
-index 8c8c9064..96356b1b 100755
+index bcc3539e52e26aa578c49a38abb44922a1e98a98..d8632123c9cd884ad4dccb760bb61c13f5fabeba 100755
 --- a/dist/RingOut-1.0-dist/setup.sh
 +++ b/dist/RingOut-1.0-dist/setup.sh
 @@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
@@ -88,7 +79,7 @@ index 8c8c9064..96356b1b 100755
  else
      MARCH="native"
  fi
-@@ -394,7 +404,10 @@ echo "==> 3/$NSTAGES  Building the module"
+@@ -479,7 +489,10 @@ echo "==> 3/$NSTAGES  Building the module"
  # regions. So: use the profile for THIS disc, and if there is not one, use none.
  PGO_ARGS=()
  PROFILE=""
@@ -100,5 +91,3 @@ index 8c8c9064..96356b1b 100755
      if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
          PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
      elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
--- 
-2.43.0

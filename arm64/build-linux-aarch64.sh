@@ -28,6 +28,7 @@ if [ "${RINGOUT_IN_CROSS:-0}" != 1 ] && [ "$uname_m" != "aarch64" ] && [ "$uname
     -e BUILD=/work/build-arm64-cross \
     -e OUT=/work/release \
     -e RINGOUT_IN_CROSS=1 \
+    --user "$(id -u):$(id -g)" \
     -v "$ROOT:/work" \
     -v "$REPO:/src" \
     -w /src \
@@ -142,7 +143,7 @@ elif [ -d "$REPO/ModernGekko/vendor/dolphin/Data/Sys" ]; then
 fi
 
 if [ -x "$REPO/dist/shared/stage-gamesettings.sh" ]; then
-  "$REPO/dist/shared/stage-gamesettings.sh" "$STAGE" || true
+  "$REPO/dist/shared/stage-gamesettings.sh" "$REPO" "$STAGE/userdata/GameSettings" || true
 fi
 
 echo "==> collecting aarch64 support libraries"
@@ -205,6 +206,12 @@ print(len([n for n in seen if n not in skip]))
 PY
 }
 collect_libs "$RUNTIME" "$STAGE/lib"
+# PulseAudio keeps this private helper below pulseaudio/, outside the generic
+# DT_NEEDED lookup directories. Bundle it beside libpulse so LD_LIBRARY_PATH
+# resolves the aarch64 runtime on a minimal target.
+if [ "${RINGOUT_IN_CROSS:-0}" = 1 ] && [ -f /work/sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so ]; then
+  install -m 755 /work/sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so "$STAGE/lib/libpulsecommon-16.1.so"
+fi
 echo "    $(ls "$STAGE/lib" | wc -l) libraries"
 
 # GPL source shipment: keep a pointer, not a second 500 MB tree.
