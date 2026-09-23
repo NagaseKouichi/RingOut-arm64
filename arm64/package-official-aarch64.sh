@@ -104,6 +104,17 @@ for f in "$DIST"/shaders/*.glsl; do install -m 644 "$f" "$COMPILE/shaders/"; don
 copy_libs "$COMPILE"
 cp -a "$BUILT/module-src" "$COMPILE/module-src"
 
+# Public binary releases carry the corresponding source shipment generated from
+# this fork commit. Do not borrow the upstream x86 source folder: it would not
+# describe these aarch64 binaries or their portability guards.
+SRC_SHIP="${SRC_SHIP:-$REPO/release/gpl-source}"
+if ! compgen -G "$SRC_SHIP/*.tar.gz" >/dev/null; then
+  echo "FAIL: no GPL source shipment in $SRC_SHIP; run arm64/regen-source.sh first" >&2
+  exit 1
+fi
+mkdir -p "$COMPILE/source"
+cp -a "$SRC_SHIP/." "$COMPILE/source/"
+
 "$REPO/dist/shared/stage-gamesettings.sh" "$REPO" "$COMPILE/userdata/GameSettings" || true
 
 assert_clean "$COMPILE"
@@ -215,6 +226,8 @@ for zpath in sys.argv[1:]:
     with zipfile.ZipFile(zpath) as z:
         names = z.namelist()
         assert not any('/game/' in n or n.endswith('_recomp.so') for n in names), zpath
+        if 'linux-aarch64' in zpath:
+            assert any('/source/' in n and n.endswith('.tar.gz') for n in names), zpath
         for want in ('RingOut', 'bin/moderngekko-run'):
             hits = [n for n in names if n.endswith('/'+want) or n.endswith(want)]
             assert hits, (zpath, want)
