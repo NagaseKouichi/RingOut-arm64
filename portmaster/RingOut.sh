@@ -5,7 +5,10 @@
 # It intentionally uses ROCKNIX's current glibc, Freedreno/Mesa Vulkan ICD,
 # Wayland session and InputPlumber controller mapping; no foreign runtime rootfs
 # or system files are installed.
-set -eu
+# PortMaster's control.txt and device_info.txt intentionally probe variables that
+# are unset on some ROCKNIX devices. Do not enable bash nounset while sourcing
+# those upstream scripts: DEVICE_INFO_VERSION is one such optional variable.
+set -e
 
 PORT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 GAME_DIR="$PORT_DIR/RingOut"
