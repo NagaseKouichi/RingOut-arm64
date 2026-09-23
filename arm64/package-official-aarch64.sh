@@ -178,8 +178,8 @@ INSTALLING
   once from the package directory before starting the game:
       chmod +x RingOut bin/moderngekko-run
 
-  Linux `unzip` preserves these permissions; graphical file managers and some
-  file-copy workflows may not.
+  The Linux unzip command preserves these permissions; graphical file managers
+  and some file-copy workflows may not.
 
 REQUIREMENTS
   - A working Vulkan driver
