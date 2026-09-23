@@ -174,6 +174,13 @@ INSTALLING
   Put this folder anywhere. Run ./RingOut from a terminal, or add it as
   a non-Steam / desktop shortcut.
 
+  If your archive manager did not preserve executable permissions, run this
+  once from the package directory before starting the game:
+      chmod +x RingOut bin/moderngekko-run
+
+  Linux `unzip` preserves these permissions; graphical file managers and some
+  file-copy workflows may not.
+
 REQUIREMENTS
   - A working Vulkan driver
   - glibc 2.38 or newer (Fedora aarch64 is fine)
