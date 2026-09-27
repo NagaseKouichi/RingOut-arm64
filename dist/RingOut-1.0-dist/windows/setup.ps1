@@ -212,21 +212,20 @@ if ('GRSEAF', 'GRSEPS' -contains $DiscId) {
 elseif ($DiscId -eq 'GRSPAF') {
     # PAL, playtested, with its OWN six: the movie library sits +0x7750 from the
     # US one (mapped by .github/scripts/map-fmv-hooks.py, all six agreeing on
-    # that delta). The run loop cannot hook them today -- it compares the US
-    # literals, which are not entry points on this disc either -- so this is
-    # passed to match the playtested build and to stay correct if the runtime
-    # ever gains a per-disc hook table.
+    # that delta). The runtime's per-disc table (StaticRecompFmvHooks.h) hooks
+    # these same six, which needs them to stay dispatch points; it is also what
+    # the playtested build was built with.
     $LeaderCases = @('--leader-cases', '--direct-calls',
         '--dispatch-pc', '0x80213938', '--dispatch-pc', '0x80210888', '--dispatch-pc', '0x80214B08',
         '--dispatch-pc', '0x8020F5E0', '--dispatch-pc', '0x8020F638', '--dispatch-pc', '0x8020F994',
         '--self-calls')
 }
 elseif ($DiscId -eq 'GRSJAF') {
-    # JP, playtested too, but with NO --dispatch-pc and that is deliberate: the
-    # run loop compares against the US literals above whatever disc runs, and on
-    # this disc those addresses are not entry points at all (0 entry-switch
-    # cases, absent from generated_entries.txt), so they are never dispatched
-    # and the comparison can never match. The idle PC protects itself.
+    # JP, playtested too, but with NO --dispatch-pc and that is deliberate: its
+    # movie library is not mapped, so the run loop hooks nothing on this disc
+    # (no row in the per-disc table), and the US addresses are not entry points
+    # here at all (0 entry-switch cases, absent from generated_entries.txt).
+    # The idle PC protects itself.
     $LeaderCases = @('--leader-cases', '--direct-calls', '--self-calls')
 }
 # Chunk overhang, as in setup.sh: US, Plus and PAL only (one chunk boundary on

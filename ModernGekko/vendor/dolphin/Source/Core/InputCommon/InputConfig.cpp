@@ -67,6 +67,14 @@ bool InputConfig::LoadConfig()
     }
   }
 
+  // Held across every controller's load. The subclasses' LoadDefaults call the
+  // base version (which locks) and THEN set their default expressions unlocked,
+  // while a hotplug callback on another thread (the Wiimote scanner's startup
+  // population, an evdev hotplug) may be walking those same expressions in
+  // UpdateReferences: a use-after-free at launch. The mutex is recursive, and
+  // UpdateReferences acquires it together with the devices mutex.
+  const auto state_lock = ControllerEmu::EmulatedController::GetStateLock();
+
   if (inifile.Load(File::GetUserPath(D_CONFIG_IDX) + m_ini_name + ".ini") &&
       !inifile.GetSections().empty())
   {

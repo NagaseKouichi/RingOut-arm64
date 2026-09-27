@@ -125,8 +125,15 @@ bool FindMovieInAfs(int fno, std::string* out)
 // --- FMV HLE native player -------------------------------------------------
 // Decodes a Sofdec movie (from the game's movie.afs, or an extracted
 // <dir>/movie<fno>.sfd) with ffmpeg into raw ARGB8888 frames on a reader
-// thread; the CnvFrm hook pops one frame per call (the game invokes it once per
-// displayed frame -> natural pacing).
+// thread; the CnvFrm hook takes the frame the game's own decoder is on (the
+// frame number in its descriptor), so the picture keeps the game's pacing.
+//
+// "One frame per call" is NOT that pacing. The game converts once per frame it
+// DISPLAYS, and on a 50 Hz PAL disc that is 20 per second: it keeps the movie
+// in step with its audio by skipping frames of the 29.97 fps stream, so a
+// player that hands out the next decoded frame per call ran PAL movies at two
+// thirds speed, the picture falling ever further behind the sound (measured
+// 2026-09-27: 20.0 calls/s, frame numbers stepping 0x129, 0x12B, 0x12C, 0x12E).
 // ffmpeg -pix_fmt argb emits bytes A,R,G,B == GameCube big-endian ARGB8888,
 // so frames copy straight into the guest destination buffer.
 class FmvPlayer
@@ -227,6 +234,24 @@ public:
 
   // Copy the next decoded frame into out (m_frame_bytes). Reuses the last frame
   // if the decoder hasn't produced one yet; false only before the first frame.
+  // Copy decoded frame <index> (0-based, the game's own frame number) into out,
+  // dropping any earlier frames still queued. When the decoder has not reached
+  // it yet, the newest decoded frame is used; false only before the first one.
+  bool FrameAt(u32 index, std::vector<u8>& out)
+  {
+    std::lock_guard<std::mutex> l(m_mtx);
+    while (!m_queue.empty() && (m_index < 0 || static_cast<s64>(index) > m_index))
+    {
+      m_last.swap(m_queue.front());
+      m_queue.pop_front();
+      ++m_index;
+    }
+    if (m_last.empty())
+      return false;
+    out = m_last;
+    return true;
+  }
+
   bool Next(std::vector<u8>& out)
   {
     std::lock_guard<std::mutex> l(m_mtx);
@@ -235,6 +260,7 @@ public:
       out.swap(m_queue.front());
       m_queue.pop_front();
       m_last = out;
+      ++m_index;
       return true;
     }
     if (!m_last.empty())
@@ -257,6 +283,7 @@ public:
     }
     m_queue.clear();
     m_last.clear();
+    m_index = -1;
     m_open = false;
     m_fno = -1;
   }
@@ -326,6 +353,7 @@ private:
   std::mutex m_mtx;
   std::deque<std::vector<u8>> m_queue;
   std::vector<u8> m_last;
+  s64 m_index = -1;  // frame number of m_last; -1 before the first
   std::atomic<bool> m_stop{false};
   int m_fno = -1;
   u32 m_w = 0, m_h = 0;
@@ -510,8 +538,12 @@ void StaticRecompCore::OnFmvCnvFrm(u32 handle, u32 desc, u32 dst)
     return;
   }
 
+  // desc[8] is the frame number the game's decoder is displaying; it skips
+  // frames to hold audio sync (every 3rd of 3 on a 50 Hz disc), and the picture
+  // has to skip with it.
+  const u32 frame_no = GuestRead32(desc + 0x20u);
   static std::vector<u8> frame;
-  if (s_fmv.Next(frame) && frame.size() == bytes && (w % 4u) == 0 && (h % 4u) == 0)
+  if (s_fmv.FrameAt(frame_no, frame) && frame.size() == bytes && (w % 4u) == 0 && (h % 4u) == 0)
   {
     // The destination is a GX RGBA8 texture: 4x4 tiles, 64 bytes each, storing
     // an AR byte-plane (32 bytes) then a GB byte-plane (32 bytes), texels in
@@ -670,6 +702,10 @@ void StaticRecompCore::Run()
   // samples -- the single hottest instruction in the loop after the timebase
   // arithmetic -- for a flag that is almost always false.
   static const bool s_spinlog = std::getenv("STATICRECOMP_SPINLOG") != nullptr;
+  // The FMV hook PCs, copied out of the object so the per-dispatch compares
+  // below read registers, not memory. LoadModule (Init only) is their sole
+  // writer, so they cannot change while Run() is on the stack.
+  const StaticRecompFmvHookPcs fmv = m_fmv_pcs;
 
   while (*state_ptr == CPU::State::Running)
   {
@@ -716,12 +752,14 @@ void StaticRecompCore::Run()
 
           // Common path (no movie): just the start-detect compare. The frame /
           // decoder hooks engage only while a movie is active, so normal
-          // gameplay pays almost nothing per dispatch.
-          if (m_guest.pc == 0x8020C1E8u)  // mwPlyStartAfs(r3=handle,r4=patid,r5=fno)
+          // gameplay pays almost nothing per dispatch. The PCs are per disc
+          // (StaticRecompFmvHooks.h); on a disc with none they are unset and
+          // never match.
+          if (m_guest.pc == fmv.start_afs)  // mwPlyStartAfs(r3=handle,r4=patid,r5=fno)
             OnFmvStartAfs(m_guest.gpr[5], m_guest.gpr[4], m_guest.gpr[3]);
           if (s_fmv.Active())
           {
-            if (m_guest.pc == 0x80209138u)  // mwPlyFxCnvFrmARGB(r3=hnd,r4=desc,r5=dst)
+            if (m_guest.pc == fmv.cnv_frm)  // mwPlyFxCnvFrmARGB(r3=hnd,r4=desc,r5=dst)
             {
               // Replace the YUV->ARGB conversion: fill the destination buffer
               // natively and return to the caller, skipping the guest function.
@@ -730,32 +768,32 @@ void StaticRecompCore::Run()
               m_guest.pc = m_guest.lr;
               continue;
             }
-            if (s_fmv_dumphndl && m_guest.pc == 0x8020D3B8u)
+            if (s_fmv_dumphndl && m_guest.pc == fmv.exec_svr)
               OnFmvExecObserve(m_guest.gpr[3]);
             // Full decode-skip takeover: bypass the software MPEG pipeline and
             // synthesize the frame-ready state the game polls, so it advances
             // and blits our native frames without ever decoding.
             if (s_fmv_takeover)
             {
-              if (m_guest.pc == 0x8020D3B8u)  // mwPlyExecSvrHndl: skip MPEG decode
+              if (m_guest.pc == fmv.exec_svr)  // mwPlyExecSvrHndl: skip MPEG decode
               {
                 m_guest.gpr[3] = 0;
                 m_guest.pc = m_guest.lr;
                 continue;
               }
-              if (m_guest.pc == 0x80207E90u)  // mwPlyIsNextFrmReady: paced to 29.97fps
+              if (m_guest.pc == fmv.next_frm_ready)  // mwPlyIsNextFrmReady: paced to 29.97fps
               {
                 m_guest.gpr[3] = s_fmv.ReadyForNextFrame() ? 1u : 0u;
                 m_guest.pc = m_guest.lr;
                 continue;
               }
-              if (m_guest.pc == 0x80207EE8u)  // mwPlyRelCurFrm: nothing to release
+              if (m_guest.pc == fmv.rel_cur_frm)  // mwPlyRelCurFrm: nothing to release
               {
                 m_guest.gpr[3] = 0;
                 m_guest.pc = m_guest.lr;
                 continue;
               }
-              if (m_guest.pc == 0x80208244u)  // getfrm: fabricate the frame desc
+              if (m_guest.pc == fmv.getfrm)  // getfrm: fabricate the frame desc
               {
                 OnFmvGetFrm(m_guest.gpr[3], m_guest.gpr[4]);
                 m_guest.gpr[3] = 0;
@@ -765,7 +803,7 @@ void StaticRecompCore::Run()
             }
             else if (s_fmv_noexec)
             {
-              if (m_guest.pc == 0x8020D3B8u)
+              if (m_guest.pc == fmv.exec_svr)
               {
                 m_guest.gpr[3] = 0;
                 m_guest.pc = m_guest.lr;

@@ -50,21 +50,22 @@ whether or not the Deck is the only machine you have:
 [`dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md`](dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md)
 walks through the first route, and ships inside the Deck package too.
 
-**Netplay**: working. Rollback over a deterministic dual-core setup, with a lobby
-showing live ping and per-player game status; two peers stayed byte-identical
-over 6,470 frames.
+**Netplay**: working. Delay-based (not rollback) over a deterministic dual-core
+setup, with a lobby showing live ping and per-player game status; two peers
+stayed byte-identical over 6,470 frames.
 
 ---
 
 ## Getting it
 
-Two packages, from the [Releases](../../releases) page. Both are named for the
-release you download, so `<version>` below is `1.5.2` on the current one:
+From the [Releases](../../releases) page. Each is named for the release you
+download, so `<version>` below is that release's number:
 
 | | for | needs a toolchain? |
 | --- | --- | --- |
 | `RingOut-<version>-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
 | `RingOut-<version>-steamdeck-x86_64.zip` | Steam Deck / SteamOS | only to build a module |
+| `RingOut-<version>-windows-x64-setup.exe` / `-windows-x64.zip` | Windows (test build) | no — bundled |
 
 The Deck package ships no module, so you build one and copy `game/` and
 `bin/gGRSEAF_recomp.so` into it. You can do that **on the Deck itself** — download
@@ -80,8 +81,11 @@ For desktop, unzip and run:
 ```
 
 On first run it asks for your disc image (`.iso` / `.gcm` / `.nkit.iso` / `.rvz`),
-then extracts and recompiles it — several minutes, once. Every run after that starts
-straight away. You can also pass the image directly:
+then extracts and recompiles it — several minutes, once, with each stage
+numbered as it starts (`==> 1/3  Extracting disc`, `2/3` recompiling, `3/3`
+building the module; `--pgo` adds a fourth) and a closing line saying whether a
+PGO profile was used. Every run after that starts straight away. You can also
+pass the image directly:
 
 ```sh
 ./RingOut /path/to/disc.iso     # or: ./setup.sh /path/to/disc.iso
@@ -213,6 +217,8 @@ stop a run from measuring the wrong thing, are in
 
 ### What shipped
 
+Up to 1.6.1:
+
 | Change | Effect |
 | --- | --- |
 | Inline the paired-single helper chain | psq cost per unit of work −43% |
@@ -222,6 +228,43 @@ stop a run from measuring the wrong thing, are in
 | Profile-guided optimisation | **−10.3% desktop, −14.1% Steam Deck** |
 | Per-region profiles | −12.33% for a JP module vs the US profile |
 | On-device profile training (`setup.sh --pgo`) | recovers the full win on any clang |
+
+Since 1.6.1 (September). Every row is on all four discs (US, JP, PAL and the
+Plus mod) unless it says otherwise, and every figure is CPU cycles over 16,000
+frames of a real arcade match with **both arms' PGO profiles retrained** —
+several of these looked dead or harmful until that was done, because a stale
+profile is silently discarded:
+
+| Change | Effect |
+| --- | --- |
+| Reduced entry switch (`--leader-cases`): a switch case only where control can arrive | −8.96% (US) |
+| Inline the common paired-single load/store path (`MODULE_PSQ_FAST`) | −16.51% for the full US configuration vs 1.6.1 |
+| Leaner inlined RAM access (`MODULE_MEM_FAST`): no journal, reservation or NULL tests | −6.32% on top (US), −9.97% instructions |
+| The above together, per disc, against 1.6.1 | −20.0% JP, −20.7% Plus, −21.3% PAL |
+| Direct calls (`--direct-calls`): a call into another chunk skips the dispatcher | −22.64% (US, vs 1.6.1); dispatches halved |
+| Self calls (`--self-calls`): calls within a chunk likewise | −5.79% on top (US) |
+| Direct + self calls on the other discs | −16.3% to −17.0% on top; **−34.0% to −34.8% per disc vs 1.6.1** |
+| Check a psq pair's 8-byte span once | −0.66% to −1.05% |
+| Burn the 24 MB RAM bound into the fast paths as a constant | −0.79% to −2.11% |
+| Unpack the condition register, one byte per field | −2.57% to −3.20% |
+| Cache `ctx->ram` in a chunk-entry local | −1.42% to −2.01% |
+| `PSQ_SIMD`, `FMA_LAZY`, `DC_LOCAL` (both psq lanes in one SSE register; lazy FPRF in fma; downcount in a local) | −1.42% to −2.32% together |
+| Twin chunks: a hot copy entered only where training saw it, with read-mostly registers in locals, and the ordinary chunk as a cold fallback | **−5.65% to −6.67% (Deck)** |
+| Chunk overhang (`--chunk-overhang 512`): a chunk runs past its window to close a straddled hot loop — US, Plus, PAL | −1.84% (US, Deck); 206–270 M fewer dispatches per run |
+| RAM-only store bases (`--ram-bases 1,2,13`): stores off r1/r2/r13 skip the RAM/MMIO test | −0.39% to −1.07% (Deck) |
+| Twin hot lists re-recorded after the overhang changed which entries are hot — US, Plus, PAL | −1.50% to −2.47% (Deck) |
+
+Direct and self calls change guest timing slightly, so frame hashes differ from
+a build without them. They were gated instead on determinism over two routes
+(arcade and a VS fight, each run twice), on a static proof that no PC the run
+loop hooks is bypassed, and on a hands-on playtest of each disc. Replays now
+carry a timing marker, so one recorded on a build with different timing warns
+when played back instead of silently desyncing. The European disc passes its
+own six movie-player hook addresses as `--dispatch-pc`; the Japanese disc
+passes none, because the US hook addresses are not entry points in its
+executable at all. The chunk overhang is left off the Japanese disc for the
+same timing reason: its layout does not straddle the loop, and the shifted
+event timing changed its path for no gain.
 
 The FPRF one is the shape most of these take: the FP condition register is
 written 3.07 billion times per run and read 15,885 times — mandatory by
@@ -284,8 +327,6 @@ around it:
 - **Bundle the toolchain in the package**, so "install these four things first"
   stops being step one. This is probably the single biggest reduction in people
   who never get it running.
-- **Say what the first run is doing.** It currently goes quiet for several
-  minutes, which is indistinguishable from being hung.
 - **A Deck path that does not need a desktop.** Getting a module there still
   means owning another machine or installing a toolchain on the handheld.
 
@@ -308,16 +349,18 @@ Beyond closing those:
   game's textures; exposing it would let people *make* packs rather than only
   install them, which is what a mod scene actually needs.
 
-**3. Whether any performance is left.** The stage-by-stage figures behind this
-page's numbers predate the Steam Deck training its own PGO profile, which was
-worth 14%. If the slow stages now hold full speed, the performance work is
-finished and several remaining ideas die with it — which is worth knowing either
+**3. Whether any performance is left.** September's work took more than a
+third off CPU cycles on every disc, so the answer so far has been yes. The
+stage-by-stage figures predate all of it, though; if the slow stages now hold
+full speed, the remaining ideas matter less — which is worth knowing either
 way.
 
-**4. A Windows build — coming.** No date yet. The scaffolding from the earlier
-Windows work is still in the tree, so this is a revival rather than a fresh
-start — but it is unbuilt and untested today, and nothing currently on the
-Releases page will run there.
+**4. Windows as a first-class target.** Every release since 1.6 ships a Windows
+installer and zip, built in CI, with the toolchain bundled; `setup.ps1` carries
+the same per-disc flags as `setup.sh` with a gating check over its shipped
+lines, and the recompiler's Windows binary matches the Linux one's output on the
+US disc. What keeps it a test build is coverage: it has been played on one
+low-end laptop, against far more hands-on time on Linux and the Deck.
 
 **5. Staying current with upstream.** The recompiler and the Dolphin-derived
 runtime both have upstreams that keep moving. Most of the delta is work this
@@ -331,13 +374,13 @@ fork has measured and rejected, but not all of it.
   a Debian 12 container, which clears SteamOS and essentially every current
   distro. A build made natively on SteamOS instead has a 2.38 floor and will not
   run on older SteamOS releases — so the container build stays the shipped one.
-- **There is no Windows build yet.** Linux and the Steam Deck are the supported
-  targets today, and nothing on the Releases page will run on Windows. Work on it
-  has started rather than merely being planned: the first-party Win32 code paths
-  are back, and the workflow, packaging script, installer and launcher are in
-  their live locations again — but the CI job has not been run since, nothing has
-  been built or tested, and there is no date. Anything added since 2026-08-17 has
-  never had a Windows path at all.
+- **Windows is a test build.** Linux and the Steam Deck are the primary
+  targets. The Windows installer and zip ship with every release since 1.6, but
+  have been tested on one low-end laptop only. On it, the
+  mid-September module (direct and self calls, `MEM_FAST`) was **31.57% faster
+  in wall time** there than the one before that work, over a fixed 6,000-frame
+  route, with a profile trained under one clang accepted by another — see
+  [docs/measuring.md](docs/measuring.md#wall-time-on-a-machine-that-cannot-hit-the-frame-cap).
 - The `-march=native` build is machine-specific by design; setup compiles on your
   own machine. It matters in exactly one place: the Deck package ships no module
   and sends you here to build one, and a module built on a Zen 4/5 or recent

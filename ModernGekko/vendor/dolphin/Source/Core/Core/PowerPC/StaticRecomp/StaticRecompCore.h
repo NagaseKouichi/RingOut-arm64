@@ -14,6 +14,7 @@
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/JitCommon/JitCache.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompABI.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompFmvHooks.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
 #include "Core/RecompDeterminism.h"
 
@@ -202,6 +203,9 @@ private:
   StaticRecompModuleSource m_module_source;
   const StaticRecompModuleDesc* m_module = nullptr;
   bool m_module_active = false;
+  // The FMV HLE hook PCs for m_module's disc; all kStaticRecompNoFmvHook (never
+  // fire) for a disc with no mapped, enabled row. Set by LoadModule.
+  StaticRecompFmvHookPcs m_fmv_pcs;
   std::unique_ptr<JitBase> m_fallback_jit;
   // Whether the fallback JIT has run since its cache was last cleared. See
   // ClearCache: clearing an already-empty Jit64 code space still costs 14-16 ms.

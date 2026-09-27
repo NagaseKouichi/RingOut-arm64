@@ -390,20 +390,19 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES=(--leader-cases);; 
 # --dispatch-pc. They are US-disc addresses, which is part of why this is gated.
 #
 # Mapped for the other discs by .github/scripts/map-fmv-hooks.py (vote over
-# mid-function slices; a single shared delta across all six is the validator).
-# Recorded here so enabling a disc does not mean rediscovering them -- NOT used
-# yet, because --direct-calls also needs a hands-on playtest per disc:
-#   Plus (GRSEPS): identical to the US addresses, delta 0, 23-24/24 votes --
-#                  so the same list below is correct for it, and it is used.
+# mid-function slices; a single shared delta across all six is the validator):
+#   Plus (GRSEPS): identical to the US addresses, delta 0, 23-24/24 votes.
 #   PAL  (GRSPAF): the whole library sits +0x7750 -> 0x80213938 0x80210888
-#                  0x80214B08 0x8020F5E0 0x8020F638 0x8020F994. Measured
-#                  (-16.38% on top) and gated, but NOT enabled: no playtest yet.
+#                  0x80214B08 0x8020F5E0 0x8020F638 0x8020F994.
 #   JP   (GRSJAF): NOT mapped. Only 2 of 6 agree and their deltas do not
 #                  cluster, so its library is rearranged, not just relocated.
-#                  Also measured (-17.01%) and gated, also awaiting a playtest.
-# Note the runtime compares against the US literals whatever the disc, so on
-# JP/PAL these hooks cannot fire at all until it gains a per-disc table; the
-# mapped values matter for that fix, not for --dispatch-pc today.
+#                  map-fmv-hooks.py --masked is the pass for that case; it has
+#                  not been run against the JP disc yet.
+# The runtime hooks each disc's own six from a per-disc table keyed on the
+# module's game id (StaticRecompFmvHooks.h), which must agree with the lists
+# below. US, Plus and PAL are playtested with the native movie player; JP has
+# no row. A row added before its playtest stays off unless
+# STATICRECOMP_FMV_UNPLAYTESTED=1.
 #
 # US AND PLUS. Plus is a hack of the US text -- its movie library is
 # byte-identical at all six addresses -- and it was playtested on this build,
@@ -412,22 +411,19 @@ case "$DISC_ID" in
 GRSEAF|GRSEPS) LEADER_CASES+=(--direct-calls
     --dispatch-pc 0x8020C1E8 --dispatch-pc 0x80209138 --dispatch-pc 0x8020D3B8
     --dispatch-pc 0x80207E90 --dispatch-pc 0x80207EE8 --dispatch-pc 0x80208244);;
-# JP passes NO --dispatch-pc, and that is not an oversight. The run loop
-# compares against the US literals above whatever disc is running, and on this
-# disc those addresses are not entry points AT ALL -- 0 entry-switch cases and
-# absent from generated_entries.txt -- so they are never dispatched and the
-# comparison can never match. Passing them would only make the wrong code
-# reachable by the dispatcher. The idle PC protects itself (the recompiler adds
+# JP passes NO --dispatch-pc, and that is not an oversight. Its movie library is
+# not mapped, so the run loop hooks nothing on this disc (no row in the per-disc
+# table), and the US addresses are not entry points here AT ALL -- 0 entry-switch
+# cases and absent from generated_entries.txt. Passing them would only make the
+# wrong code reachable by the dispatcher. The idle PC protects itself (the recompiler adds
 # it, emitter.c emit_set_idle_pc), and it is in the entry list here with no
 # flag passed.
 GRSJAF) LEADER_CASES+=(--direct-calls);;
 # PAL passes its OWN six, mapped by .github/scripts/map-fmv-hooks.py: the whole
-# movie library sits +0x7750 from the US one. The run loop cannot hook them
-# today (it compares the US literals), so this is not what makes PAL safe --
-# the US literals are not entry points here either. It is passed because it is
-# what the playtested build was built with, and because it keeps the module
-# correct if the runtime ever gains a per-disc hook table. Six extra dispatch
-# points out of 185066.
+# movie library sits +0x7750 from the US one. The runtime's per-disc table hooks
+# these same six, and they must stay dispatch points for that to work under
+# --direct-calls. It is also what the
+# playtested build was built with. Six extra dispatch points out of 185066.
 GRSPAF) LEADER_CASES+=(--direct-calls
     --dispatch-pc 0x80213938 --dispatch-pc 0x80210888 --dispatch-pc 0x80214B08
     --dispatch-pc 0x8020F5E0 --dispatch-pc 0x8020F638 --dispatch-pc 0x8020F994);;

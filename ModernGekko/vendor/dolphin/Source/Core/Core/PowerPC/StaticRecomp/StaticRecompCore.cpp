@@ -340,6 +340,7 @@ void StaticRecompCore::Shutdown()
   m_lockstep_verifier.reset();
   m_block_cache.Shutdown();
   m_module = nullptr;
+  m_fmv_pcs = {};
   if (m_library.IsOpen())
     m_library.Close();
 
@@ -420,6 +421,16 @@ void StaticRecompCore::LoadModule()
 
   m_module = desc;
   m_module_active = (desc != nullptr);
+  {
+    // STATICRECOMP_FMV_UNPLAYTESTED=1 also hooks discs whose row is mapped but
+    // not yet playtested with the native movie player (none today).
+    const bool unplaytested = std::getenv("STATICRECOMP_FMV_UNPLAYTESTED") != nullptr;
+    m_fmv_pcs = StaticRecompFindFmvHooks(desc->game_id, unplaytested);
+    NOTICE_LOG_FMT(POWERPC, "StaticRecomp: FMV hooks for {}: {}", desc->game_id,
+                   m_fmv_pcs.start_afs != kStaticRecompNoFmvHook ? fmt::format("mwPlyStartAfs at {:#010x}",
+                                                     m_fmv_pcs.start_afs) :
+                                         std::string("none (the game decodes its own movies)"));
+  }
   {
     // Optional export; a module built before it existed has dispatcher timing.
     const auto* timing =

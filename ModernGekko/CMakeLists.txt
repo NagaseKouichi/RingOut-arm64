@@ -591,6 +591,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
 
+    # The per-disc FMV hook table, checked against the --dispatch-pc lists setup.sh
+    # and setup.ps1 pass: a hooked PC that is not a dispatch point never fires.
+    add_executable(moderngekko_fmv_hooks_test tests/fmv_hooks_test.cpp)
+    target_include_directories(moderngekko_fmv_hooks_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp")
+    target_compile_features(moderngekko_fmv_hooks_test PRIVATE cxx_std_17)
+    target_compile_definitions(moderngekko_fmv_hooks_test PRIVATE
+        RINGOUT_SETUP_SH="${CMAKE_CURRENT_SOURCE_DIR}/../dist/RingOut-1.0-dist/setup.sh"
+        RINGOUT_SETUP_PS1="${CMAKE_CURRENT_SOURCE_DIR}/../dist/RingOut-1.0-dist/windows/setup.ps1")
+    add_test(NAME moderngekko.fmv_hooks COMMAND moderngekko_fmv_hooks_test)
+
     if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         add_executable(moderngekko_netplay_protocol_test
             tests/netplay_protocol_test.cpp

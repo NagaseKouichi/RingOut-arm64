@@ -13,6 +13,18 @@ corrupting the answer. A start address that several independent slices agree on,
 and that looks like a function entry, is a real mapping.
 
 Reports addresses only; copies nothing out of any DOL.
+
+--masked adds a second pass for a library that was REARRANGED rather than
+relocated (JP). Moving functions changes the displacement of every `bl` between
+them, and a 32-byte slice nearly always holds one, so a byte-exact slice cannot
+match -- which is why JP drew 1-5 votes. The masked pass compares instructions
+with the fields that legitimately differ between builds blanked out: branch
+displacements, `lis`/`addis` and `addi`/`ori` immediates (absolute address
+halves), and small-data offsets off r2/r13. What is left -- opcodes, registers,
+struct offsets, compare constants -- still has to agree across the whole slice.
+A rearranged library has no shared delta, so this pass accepts per function
+and reports, as its validator, whether pairs that are adjacent in the US build
+keep their US spacing.
 """
 import collections
 import struct
@@ -63,6 +75,102 @@ def find_all(secs, pat):
     return out
 
 
+def mask_word(w):
+    """Blank the fields of one PowerPC instruction that differ between builds."""
+    op = w >> 26
+    ra = (w >> 16) & 31
+    if op == 18:                      # b / bl: keep opcode, AA, LK
+        return w & 0xFC000003
+    if op == 16:                      # bc: keep BO/BI, AA, LK
+        return w & 0xFFFF0003
+    if op == 15:                      # lis / addis: an address half
+        return w & 0xFFFF0000
+    if op in (14, 24) and ra != 0:    # addi rD,rA,lo / ori: an address half
+        return w & 0xFFFF0000
+    if 32 <= op <= 55 and ra in (2, 13):  # D-form load/store off a small-data base
+        return w & 0xFFFF0000
+    return w
+
+
+def masked_words(data):
+    n = len(data) // 4
+    return [mask_word(x) for x in struct.unpack(f">{n}I", data[:n * 4])]
+
+
+def masked_index(secs):
+    """(address, masked words) per section, plus a 2-word key -> word index."""
+    out = []
+    for a, s, data in secs:
+        words = masked_words(data)
+        key = collections.defaultdict(list)
+        for i in range(len(words) - 1):
+            key[(words[i], words[i + 1])].append(i)
+        out.append((a, words, key))
+    return out
+
+
+def find_all_masked(index, pat_words):
+    hits = []
+    k = (pat_words[0], pat_words[1])
+    for a, words, key in index:
+        for i in key.get(k, ()):
+            if words[i:i + len(pat_words)] == pat_words:
+                hits.append(a + i * 4)
+    return hits
+
+
+def vote(us, addr, finder):
+    votes = collections.Counter()
+    tried = 0
+    for off in OFFSETS:
+        for w in WIDTHS:
+            pat = read_at(us, addr + off, w)
+            if not pat or len(pat) < w:
+                continue
+            tried += 1
+            hits = finder(pat)
+            # A slice that matches everywhere is noise; one that matches a
+            # handful of places still votes, and agreement decides.
+            if 0 < len(hits) <= 4:
+                for h in hits:
+                    votes[h - off] += 1
+    return votes, tried
+
+
+def masked_pass(us, target_secs, target):
+    """Per-function masked vote, for a library that was rearranged."""
+    print(f"  -- masked pass (branch displacements and address halves blanked)")
+    index = masked_index(target_secs)
+    got = {}
+    for addr, label in HOOKS:
+        votes, tried = vote(us, addr, lambda pat: find_all_masked(index, masked_words(pat)))
+        if not votes:
+            print(f"  {label:22s} NO VOTES from {tried} slices")
+            continue
+        best, n = votes.most_common(1)[0]
+        runner = votes.most_common(2)[1][1] if len(votes) > 1 else 0
+        entry = looks_like_entry(target_secs, best)
+        # Stricter than the exact pass: a masked slice is easier to match by
+        # coincidence, so it needs twice the margin over the runner-up.
+        ok = n >= 4 and n >= 2 * max(runner, 1) and entry
+        print(f"  {label:22s} 0x{best:08X}  votes {n}/{tried}"
+              f"  runner-up {runner}  entry {'yes' if entry else 'NO'}"
+              f"  delta {best - addr:+#x}   {'ACCEPT' if ok else 'reject'}")
+        if ok:
+            got[label] = best
+    # Validator: functions adjacent in the US build usually stay adjacent when
+    # a library is rearranged at object-file granularity, so their spacing
+    # should survive even when the deltas do not match.
+    us_at = dict((l, a) for a, l in HOOKS)
+    ordered = sorted(HOOKS)
+    for (a0, l0), (a1, l1) in zip(ordered, ordered[1:]):
+        if l0 in got and l1 in got:
+            same = got[l1] - got[l0] == a1 - a0
+            print(f"  spacing {l0} -> {l1}: US {a1 - a0:#x}, {target} "
+                  f"{got[l1] - got[l0]:+#x}  {'kept' if same else 'CHANGED'}")
+    return got
+
+
 def looks_like_entry(secs, addr):
     head = read_at(secs, addr, 8)
     if not head:
@@ -71,7 +179,12 @@ def looks_like_entry(secs, addr):
     return (w0 >> 16) == 0x9421 or w0 == 0x7C0802A6 or w1 == 0x7C0802A6
 
 
+MASKED = False
+
+
 def main():
+    global MASKED
+    MASKED = "--masked" in sys.argv[1:]
     secs = {}
     for name, path in DISCS.items():
         try:
@@ -89,20 +202,7 @@ def main():
         print("=" * 76)
         results[target] = {}
         for addr, label in HOOKS:
-            votes = collections.Counter()
-            tried = 0
-            for off in OFFSETS:
-                for w in WIDTHS:
-                    pat = read_at(us, addr + off, w)
-                    if not pat or len(pat) < w:
-                        continue
-                    tried += 1
-                    hits = find_all(secs[target], pat)
-                    # A slice that matches everywhere is noise; one that matches
-                    # a handful of places still votes, and agreement decides.
-                    if 0 < len(hits) <= 4:
-                        for h in hits:
-                            votes[h - off] += 1
+            votes, tried = vote(us, addr, lambda pat: find_all(secs[target], pat))
             if not votes:
                 print(f"  {label:22s} NO VOTES from {tried} slices")
                 continue
@@ -125,6 +225,14 @@ def main():
             print(f"  delta clustering: " +
                   ", ".join(f"{d:+#x} x{c}" for d, c in deltas.most_common()))
         print(f"  mapped {len(got)} of {len(HOOKS)}")
+        if MASKED and len(got) < len(HOOKS):
+            masked = masked_pass(us, secs[target], target)
+            # Where the exact pass accepted a function, it wins: it is stronger.
+            for l, a in masked.items():
+                if l in got and got[l] != a:
+                    print(f"  !! {l}: masked 0x{a:08X} disagrees with exact 0x{got[l]:08X}")
+                got.setdefault(l, a)
+            print(f"  mapped {len(got)} of {len(HOOKS)} with the masked pass")
         if len(got) == len(HOOKS):
             line = " ".join(f"--dispatch-pc 0x{got[l]:08X}" for _, l in HOOKS)
             print(f"\n  COMPLETE -- setup flags for {target}:\n  {line}")
