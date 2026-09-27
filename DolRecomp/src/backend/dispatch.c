@@ -53,7 +53,7 @@ static DispatchLookupMode dispatch_lookup_mode(void) {
 }
 
 void emit_chunk_prototype(FILE* out, u32 func_addr) {
-    fprintf(out, "void func_%08X(CPUState* ctx);\n", func_addr);
+    fprintf(out, "%svoid func_%08X(CPUState* ctx);\n", emit_chunk_cc(), func_addr);
 }
 
 void function_list_free(FunctionList* list) {
@@ -374,7 +374,7 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
         fprintf(out, "#define DOLRECOMP_TIMING_ID 3u\n");
     else if (emit_direct_calls_enabled())
         fprintf(out, "#define DOLRECOMP_TIMING_ID 2u\n");
-    fprintf(out, "\ntypedef void (*DolRecompFunction)(CPUState* ctx);\n");
+    fprintf(out, "\ntypedef void (%s*DolRecompFunction)(CPUState* ctx);\n", emit_chunk_cc());
     fprintf(out, "\n#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)\n");
     fprintf(out, "int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address);\n");
     fprintf(out, "#else\n");

@@ -3,6 +3,18 @@
 
 #include "common/types.h"
 
+/* Chunk functions' calling convention (--preserve-none; see emitter.c). Empty
+ * where the compiler lacks the attribute (clang < 19, gcc), which only costs
+ * the saving: every declaration expands the same way, so they always agree. */
+#if defined(__has_attribute)
+#if __has_attribute(preserve_none) && defined(__x86_64__)
+#define DOLRECOMP_CHUNK_FN __attribute__((preserve_none))
+#endif
+#endif
+#ifndef DOLRECOMP_CHUNK_FN
+#define DOLRECOMP_CHUNK_FN
+#endif
+
 // New-ABI CPUState (spr[1024] + mem2, no external_pointer). Kept in sync with
 // the chassis runtime header (GXRuntime core/cpu.h) for the module ABI check.
 #define GXRUNTIME_CPU_ABI_VERSION 4u
@@ -234,6 +246,33 @@ void ppc_memory_fence(void);
 #define DOLRECOMP_RAM_LOCAL(cpu) ((void)0)
 #define DOLRECOMP_RAM_ARG(cpu)   ((cpu)->ram)
 #endif
+/* DOLRECOMP_DC_LOCAL_ENABLE (module-src MODULE_DC_LOCAL): keep the cycle
+ * charge in a chunk local instead of ctx->downcount. Every block leader does
+ * `downcount -= N`, and since nearly every leader is also an entry-switch case
+ * clang must reload the field from memory there, so each block's charge waits
+ * on the previous block's store -- a store-forwarding chain through the whole
+ * chunk (4.15% of samples in the 1.6.3 profile). A local is SSA, so the joins
+ * become phis and the chain stays in a register.
+ *
+ * ctx->downcount is a charge accumulator that only three things read: the
+ * chassis after a dispatch returns, HookInstructionFallback (SyncOut reads it,
+ * SyncIn zeroes it), and a directly called chunk. So the local is written back
+ * at every return (DOLRECOMP_RETURN) and around those two calls, and reloaded
+ * after them. MMIO hooks never touch it. With the option off every macro
+ * expands to the original ctx->downcount / return, byte for byte. */
+#if defined(DOLRECOMP_DC_LOCAL_ENABLE)
+#define DOLRECOMP_DC_LOCAL(cpu)  s64 dolrecomp_dc = (cpu)->downcount
+#define DOLRECOMP_DC             dolrecomp_dc
+#define DOLRECOMP_DC_FLUSH(cpu)  ((cpu)->downcount = dolrecomp_dc)
+#define DOLRECOMP_DC_RELOAD(cpu) (dolrecomp_dc = (cpu)->downcount)
+#define DOLRECOMP_RETURN         do { ctx->downcount = dolrecomp_dc; return; } while (0)
+#else
+#define DOLRECOMP_DC_LOCAL(cpu)  ((void)0)
+#define DOLRECOMP_DC             ctx->downcount
+#define DOLRECOMP_DC_FLUSH(cpu)  ((void)0)
+#define DOLRECOMP_DC_RELOAD(cpu) ((void)0)
+#define DOLRECOMP_RETURN         return
+#endif
 DOLRECOMP_AI u8* dolrecomp_cached_ram_r(const CPUState* cpu, u8* ram, u32 addr, u32 size) {
     u32 off = addr - GC_RAM_BASE;
     (void)cpu;
@@ -297,14 +336,83 @@ DOLRECOMP_MEM_FAST_RW(16, read_be16, write_be16)
 DOLRECOMP_MEM_FAST_RW(32, read_be32, write_be32)
 DOLRECOMP_MEM_FAST_RW(64, read_be64, write_be64)
 #undef DOLRECOMP_MEM_FAST_RW
-#define mem_read8(cpu, addr)         dolrecomp_mem_read8_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr))
-#define mem_read16(cpu, addr)        dolrecomp_mem_read16_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr))
-#define mem_read32(cpu, addr)        dolrecomp_mem_read32_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr))
-#define mem_read64(cpu, addr)        dolrecomp_mem_read64_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr))
-#define mem_write8(cpu, addr, v)     dolrecomp_mem_write8_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v))
-#define mem_write16(cpu, addr, v)    dolrecomp_mem_write16_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v))
-#define mem_write32(cpu, addr, v)    dolrecomp_mem_write32_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v))
-#define mem_write64(cpu, addr, v)    dolrecomp_mem_write64_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v))
+/* RAM-base sites (--ram-bases). A load or store whose base register is the
+ * stack pointer or a small-data base can only address main RAM, so it needs
+ * neither the range test nor the slow path: one host load at a biased pointer.
+ * The emitter marks such a site by opening its block with
+ * `enum { dr_ram_site = 1 };`, which shadows the file-scope 0 below.
+ * __builtin_choose_expr resolves at parse time, so an unmarked site compiles to
+ * exactly what it did before -- no branch, and no new region for PGO to count,
+ * which matters: a `?:` here would change every chunk's CFG hash and void the
+ * shipped profiles.
+ *
+ * DOLRECOMP_RAM_SITE_CHECK builds a census variant: out-of-range addresses at a
+ * marked site are counted and take the checked path, so a run proves (or
+ * refutes) the "always RAM" premise before the unchecked form is trusted. */
+enum { dr_ram_site = 0 };
+#if defined(DOLRECOMP_RAM_SITE_CHECK)
+extern unsigned long long g_dr_ram_site_misses;
+#define DOLRECOMP_RAM_SITE_OK(addr, n) \
+    (((u32)(addr) - GC_RAM_BASE) <= GC_MAIN_RAM_SIZE - (n) || (++g_dr_ram_site_misses, 0))
+#define DOLRECOMP_RAM_SITE_RW(bits, rd, wr)                                          \
+    DOLRECOMP_AI u##bits dolrecomp_ram_read##bits(CPUState* cpu, u8* ram, u32 addr) { \
+        return DOLRECOMP_RAM_SITE_OK(addr, bits / 8u) ? rd(ram + (addr - GC_RAM_BASE)) \
+                                                      : mem_read##bits##_slow(cpu, addr); \
+    }                                                                                \
+    DOLRECOMP_AI void dolrecomp_ram_write##bits(CPUState* cpu, u8* ram, u32 addr,     \
+                                                u##bits value) {                     \
+        if (DOLRECOMP_RAM_SITE_OK(addr, bits / 8u)) {                                \
+            dolrecomp_clear_reservation(cpu, addr);                                  \
+            wr(ram + (addr - GC_RAM_BASE), value);                                   \
+        } else {                                                                     \
+            mem_write##bits##_slow(cpu, addr, value);                                \
+        }                                                                            \
+    }
+#else
+/* The biased base is loop-invariant, so the compiler hoists it and the access
+ * becomes a single [base + addr] load or store. */
+#define DOLRECOMP_RAM_SITE_RW(bits, rd, wr)                                          \
+    DOLRECOMP_AI u##bits dolrecomp_ram_read##bits(CPUState* cpu, u8* ram, u32 addr) { \
+        (void)cpu;                                                                   \
+        return rd((u8*)((uintptr_t)ram - GC_RAM_BASE + addr));                       \
+    }                                                                                \
+    DOLRECOMP_AI void dolrecomp_ram_write##bits(CPUState* cpu, u8* ram, u32 addr,     \
+                                                u##bits value) {                     \
+        dolrecomp_clear_reservation(cpu, addr);                                      \
+        wr((u8*)((uintptr_t)ram - GC_RAM_BASE + addr), value);                       \
+    }
+#endif
+DOLRECOMP_RAM_SITE_RW(8, dolrecomp_rd8, dolrecomp_wr8)
+DOLRECOMP_RAM_SITE_RW(16, read_be16, write_be16)
+DOLRECOMP_RAM_SITE_RW(32, read_be32, write_be32)
+DOLRECOMP_RAM_SITE_RW(64, read_be64, write_be64)
+#undef DOLRECOMP_RAM_SITE_RW
+/* Marked LOADS keep the checked path unless DOLRECOMP_RAM_SITE_LOADS_TOO. On
+ * Zen 2 an unchecked load issues before an older store to the same slot has
+ * resolved: store-to-load interlocks rose 34% and the Deck lost 1.13% cycles
+ * although instructions fell 2.2% (the desktop gained 1.83%). Stores produce
+ * the data, so they cannot cause it: stores-only measured -0.61% on the Deck. */
+#if defined(DOLRECOMP_RAM_SITE_LOADS_TOO)
+#define DOLRECOMP_RAM_SITE_LOADS dr_ram_site
+#else
+#define DOLRECOMP_RAM_SITE_LOADS 0
+#endif
+#define DOLRECOMP_MEM_PICK(bits, cpu, addr)                                          \
+    __builtin_choose_expr(DOLRECOMP_RAM_SITE_LOADS,                                  \
+        dolrecomp_ram_read##bits((cpu), DOLRECOMP_RAM_ARG(cpu), (addr)),             \
+        dolrecomp_mem_read##bits##_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr)))
+#define DOLRECOMP_MEM_PICKW(bits, cpu, addr, v)                                      \
+    __builtin_choose_expr(dr_ram_site,                                               \
+        dolrecomp_ram_write##bits((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v)),       \
+        dolrecomp_mem_write##bits##_r((cpu), DOLRECOMP_RAM_ARG(cpu), (addr), (v)))
+#define mem_read8(cpu, addr)         DOLRECOMP_MEM_PICK(8, cpu, addr)
+#define mem_read16(cpu, addr)        DOLRECOMP_MEM_PICK(16, cpu, addr)
+#define mem_read32(cpu, addr)        DOLRECOMP_MEM_PICK(32, cpu, addr)
+#define mem_read64(cpu, addr)        DOLRECOMP_MEM_PICK(64, cpu, addr)
+#define mem_write8(cpu, addr, v)     DOLRECOMP_MEM_PICKW(8, cpu, addr, v)
+#define mem_write16(cpu, addr, v)    DOLRECOMP_MEM_PICKW(16, cpu, addr, v)
+#define mem_write32(cpu, addr, v)    DOLRECOMP_MEM_PICKW(32, cpu, addr, v)
+#define mem_write64(cpu, addr, v)    DOLRECOMP_MEM_PICKW(64, cpu, addr, v)
 #else
 DOLRECOMP_AI u8 mem_read8(CPUState* cpu, u32 addr) {
     u8* h = dolrecomp_cached_ram(cpu, addr, 1u);
@@ -441,6 +549,37 @@ static inline bool ppc_fp_available(CPUState* cpu, u32 cia) {
 }
 
 
+/* Double -> single for guest STORES, done by the hardware but OPAQUE to the
+ * compiler. A plain (f32)x is a cvtsd2ss that clang may fold away entirely --
+ * e.g. an lfs->stfs round trip becomes a bit copy -- and whether it does
+ * depends on the surrounding control flow. The game runs with FTZ on
+ * (MXCSR 0x9F80 on ~all chunk entries), so an executed conversion flushes a
+ * denormal to zero and a folded one does not: an unrelated CFG change moved the
+ * frame hash (0x80CE6A4C at frame 4367, found by pruning entry cases). Inline
+ * asm always executes the instruction, so every build converts the same way.
+ * This keeps the existing semantics (round, FTZ flush); matching Dolphin's
+ * truncating ConvertToSingle exactly measured +1.64% cycles on the Deck. */
+static inline f32 dolrecomp_cvt_single(f64 v) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    f32 r;
+#if defined(__AVX__)
+    /* VEX form, as the compiler would emit it: a legacy-SSE write merges the
+     * register's upper half and stalls behind whatever last wrote it. The
+     * legacy form made JP's twin build 5.8% SLOWER on the Deck. */
+    __asm__("vcvtsd2ss %1, %1, %0" : "=x"(r) : "x"(v));
+#else
+    __asm__("cvtsd2ss %1, %0" : "=x"(r) : "x"(v));
+#endif
+    return r;
+#else
+    return (f32)v;
+#endif
+}
+static inline u32 dolrecomp_store_single(f64 v) {
+    f32 r = dolrecomp_cvt_single(v);
+    u32 b; memcpy(&b, &r, sizeof(b)); return b;
+}
+
 /* Paired-single quantised load/store: a SLIM inline fast path per call site.
  *
  * Every psq_l/psq_st in a chunk used to be a 7-argument out-of-line call (the
@@ -492,7 +631,7 @@ DOLRECOMP_PSQ_AI bool dolrecomp_psq_type0_ok(const CPUState* cpu, u32 gqr_type_b
 }
 
 DOLRECOMP_PSQ_AI u32 dolrecomp_psq_single_bits(f64 value) {
-    f32 single = (f32)value;
+    f32 single = dolrecomp_cvt_single(value);
     u32 bits;
     memcpy(&bits, &single, sizeof(bits));
     return ((bits & 0x7F800000u) == 0u && (bits & 0x007FFFFFu) != 0u) ? 0u : bits;
@@ -504,11 +643,53 @@ DOLRECOMP_PSQ_AI f64 dolrecomp_psq_single_value(u32 bits) {
     return (f64)single;
 }
 
+/* DOLRECOMP_PSQ_SIMD (module-src MODULE_PSQ_SIMD): move BOTH lanes of a
+ * type-0 paired-single load/store through one SSE register instead of two
+ * scalar conversions. Bit-identical by construction: cvtpd2ps/cvtps2pd round
+ * each lane exactly as cvtsd2ss/cvtss2sd do under the same MXCSR, and the
+ * denormal flush is the same predicate as dolrecomp_psq_single_bits, applied
+ * with vector masks: a lane whose exponent is 0 and fraction non-zero becomes
+ * +0.0f (0u), everything else, +/-0 included, passes through. The profile put
+ * that per-lane flush line alone at 2.1% of all samples. */
+#if defined(DOLRECOMP_PSQ_SIMD) && defined(__SSSE3__)
+#include <immintrin.h>
+#define DOLRECOMP_PSQ_SIMD_ON 1
+DOLRECOMP_PSQ_AI void dolrecomp_psq_store2(u8* h, f64 lane0, f64 lane1) {
+    /* opaque cvtpd2ps, for the same reason as dolrecomp_cvt_single */
+    __m128 f;
+#if defined(__AVX__)
+    __asm__("vcvtpd2psx %1, %0" : "=x"(f) : "x"(_mm_set_pd(lane1, lane0)));
+#else
+    __asm__("cvtpd2ps %1, %0" : "=x"(f) : "x"(_mm_set_pd(lane1, lane0)));
+#endif
+    __m128i s = _mm_castps_si128(f);
+    const __m128i zero = _mm_setzero_si128();
+    __m128i expz  = _mm_cmpeq_epi32(_mm_and_si128(s, _mm_set1_epi32(0x7F800000)), zero);
+    __m128i fracz = _mm_cmpeq_epi32(_mm_and_si128(s, _mm_set1_epi32(0x007FFFFF)), zero);
+    s = _mm_andnot_si128(_mm_andnot_si128(fracz, expz), s);
+    s = _mm_shuffle_epi8(s, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 8, 9, 10, 11, 12, 13, 14, 15));
+    _mm_storel_epi64((__m128i*)(void*)h, s);
+}
+DOLRECOMP_PSQ_AI void dolrecomp_psq_load2(const u8* h, f64* lane0, f64* lane1) {
+    __m128i s = _mm_loadl_epi64((const __m128i*)(const void*)h);
+    s = _mm_shuffle_epi8(s, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 8, 9, 10, 11, 12, 13, 14, 15));
+    __m128d d = _mm_cvtps_pd(_mm_castsi128_ps(s));
+    _mm_storel_pd(lane0, d);
+    _mm_storeh_pd(lane1, d);
+}
+#endif
+
 DOLRECOMP_PSQ_AI bool dolrecomp_psq_load_inline_r(CPUState* cpu, u8* ram, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
     if (__builtin_expect(dolrecomp_psq_type0_ok(cpu, (cpu->gqr[gqr_index & 7u] >> 16) & 7u, ea, indexed), 1)) {
         u32 off = ea - GC_RAM_BASE;
         if (__builtin_expect(off <= GC_MAIN_RAM_SIZE - 8u, 1)) {
             const u8* h = ram + off;
+#if defined(DOLRECOMP_PSQ_SIMD_ON)
+            if (!w) {
+                dolrecomp_psq_load2(h, &cpu->fpr[frD], &cpu->ps1[frD]);
+                return true;
+            }
+#endif
             cpu->fpr[frD] = dolrecomp_psq_single_value(read_be32(h));
             cpu->ps1[frD] = w ? 1.0 : dolrecomp_psq_single_value(read_be32(h + 4));
         } else {
@@ -527,6 +708,12 @@ DOLRECOMP_PSQ_AI bool dolrecomp_psq_store_inline_r(CPUState* cpu, u8* ram, u8 fr
             u8* h = ram + off;
             dolrecomp_clear_reservation(cpu, ea);
             dolrecomp_journal_cached(cpu, h, w ? 4u : 8u);
+#if defined(DOLRECOMP_PSQ_SIMD_ON)
+            if (!w) {
+                dolrecomp_psq_store2(h, cpu->fpr[frS], cpu->ps1[frS]);
+                return true;
+            }
+#endif
             write_be32(h, dolrecomp_psq_single_bits(cpu->fpr[frS]));
             if (!w) {
                 write_be32(h + 4, dolrecomp_psq_single_bits(cpu->ps1[frS]));

@@ -101,6 +101,7 @@ add_library(dr_backend STATIC
     src/backend/emitter.c
     src/backend/dispatch.c
     src/backend/codegen.c
+    src/backend/twin.c
     src/backend/symbols.c
 )
 target_include_directories(dr_backend PUBLIC ${DOLRECOMP_SRC})

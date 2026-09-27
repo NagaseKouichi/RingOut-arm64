@@ -437,6 +437,22 @@ esac
 # -5.8% CPU cycles on top of the above for US; the two together are -16.34% for
 # Plus, taking it to -34.0% against what a Plus player gets today.
 case "$DISC_ID" in GRSEAF|GRSEPS|GRSJAF|GRSPAF) LEADER_CASES+=(--self-calls);; esac
+# --chunk-overhang (US, Plus, PAL): chunks are fixed 16 KB windows, and on these
+# three discs one boundary falls inside a hot loop (0x8000D8D0-0x8000D96C), so
+# every iteration made two dispatcher round trips -- ~13% of all chunk entries.
+# The overhang lets a chunk run on past its window to the first exit, so the
+# loop closes inside one chunk. -1.84% CPU cycles for US on the Steam Deck.
+# NOT for JP: its layout does not straddle, and fewer dispatches shift event
+# timing -- on JP that changed the game's path for nothing in return.
+case "$DISC_ID" in GRSEAF|GRSEPS|GRSPAF) LEADER_CASES+=(--chunk-overhang 512);; esac
+# --ram-bases 1,2,13 (all four discs): r1, r2 and r13 are the stack pointer and
+# the two small-data bases, and only ever address main RAM. A STORE based on one
+# skips the range test that decides between RAM and MMIO (loads keep it: on Zen 2
+# a load straight after a store to the same place stalls either way, and taking
+# it for loads too measured +1.13%). A census over arcade and VS on every disc
+# found no marked access outside RAM. Steam Deck, cycles, both arms retrained:
+# US -0.61%, JP -0.39%, Plus -1.07%, PAL -0.89%; the game's behaviour is unchanged.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--ram-bases 1,2,13);; esac
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every
@@ -447,8 +463,18 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) PSQ_FAST=(-DMODULE_PSQ_FAST=ON);
 # debug-journal, reservation or NULL tests. -6.3% CPU cycles on top of the
 # above with its retrained profile; the game's behaviour is unchanged.
 case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) PSQ_FAST+=(-DMODULE_MEM_FAST=ON);; esac
+# Twin chunks: every chunk is emitted twice -- a fast copy entered only at the
+# entry PCs a training run actually used, with rarely-written guest registers
+# held in locals, and the ordinary chunk as a cold fallback for any other entry,
+# so any entry stays correct. The hot-entry list ships beside the profile.
+# About -6 to -8% CPU cycles per disc on the Steam Deck, game behaviour
+# unchanged. A disc without a list builds exactly as before.
+TWIN=()
+if [ -f "$HERE/module-src/profiles/$DISC_ID.hot" ]; then
+    TWIN=(--twin-hot "$HERE/module-src/profiles/$DISC_ID.hot" --twin-regs ratio)
+fi
 "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
-    "${LEADER_CASES[@]}" -j"$(nproc)" "$HERE/work/out"
+    "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out"
 # gen_module_tables.py reads main.dol from alongside the generated sources.
 cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol"
 

@@ -108,22 +108,22 @@ int main(int argc, char** argv) {
     }
 
     emit_header(out);
-    emit_function(out, insts, (u32)count, BASE);
+    emit_function(out, insts, (u32)count, (u32)count, BASE);
 
     PPCInst external_branch[3];
     external_branch[0] = ppc_decode(0x48001000, BASE + 0x1000);
     external_branch[1] = ppc_decode(0x41821000, BASE + 0x1004);
     external_branch[2] = ppc_decode(0x4E800020, BASE + 0x1008);
-    emit_function(out, external_branch, 3, BASE + 0x1000);
+    emit_function(out, external_branch, 3, 3, BASE + 0x1000);
 
     PPCInst adjacent_branch[3];
     adjacent_branch[0] = ppc_decode(0x48001000, BASE + 0x100C);
     adjacent_branch[1] = ppc_decode(0x41821000, BASE + 0x1010);
     adjacent_branch[2] = ppc_decode(0x4E800020, BASE + 0x1014);
-    emit_function(out, adjacent_branch, 3, BASE + 0x100C);
+    emit_function(out, adjacent_branch, 3, 3, BASE + 0x100C);
 
     PPCInst linked_lr_branch = ppc_decode(0x4E800021, BASE + 0x1018);
-    emit_function(out, &linked_lr_branch, 1, BASE + 0x1018);
+    emit_function(out, &linked_lr_branch, 1, 1, BASE + 0x1018);
 
     FunctionList funcs = {0};
     if (!function_list_add(&funcs, BASE, BASE + (u32)count * 4u) ||

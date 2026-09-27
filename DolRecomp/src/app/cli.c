@@ -19,6 +19,17 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
     fprintf(stderr, "  --leader-cases                 Reduced entry switch: leaders + FP-guard sites + program-wide\n");
     fprintf(stderr, "                                 branch/data targets (hash-clean, -8%% cycles; DOL input)\n");
+    fprintf(stderr, "  --chunk-overhang <max>         Let each chunk run on past its window, up to <max>\n");
+    fprintf(stderr, "                                 instructions, to the first unconditional exit, so\n");
+    fprintf(stderr, "                                 code straddling a boundary stays in one chunk\n");
+    fprintf(stderr, "  --ram-bases <list>             D-form loads/stores based on these registers (e.g.\n");
+    fprintf(stderr, "                                 1,2,13) skip the range test: they only reach RAM\n");
+    fprintf(stderr, "  --preserve-none                Chunk functions use clang's preserve_none convention\n");
+    fprintf(stderr, "  --twin-hot <file>              Twin chunks: a fast copy entered only at the hot PCs listed\n");
+    fprintf(stderr, "                                 (\"PC [hits]\" lines) with register locals, the full chunk\n");
+    fprintf(stderr, "                                 as a cold fallback for every other entry\n");
+    fprintf(stderr, "  --twin-regs <list>             Registers the fast copy keeps in locals (default 1,2,13,28-31\n");
+    fprintf(stderr, "                                 as 1,2,13,28,29,30,31)\n");
     fprintf(stderr, "  --direct-calls                 Call across chunks natively instead of via the chassis\n");
     fprintf(stderr, "                                 (changes guest timing; pass every hooked PC as --dispatch-pc)\n");
     fprintf(stderr, "  --self-calls                   With --direct-calls: same-chunk bl also calls natively\n");
@@ -168,6 +179,41 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
 
         if (strcmp(arg, "--leader-cases") == 0) {
             opts->leader_cases = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--preserve-none") == 0) {
+            opts->preserve_none = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--ram-bases") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            opts->ram_bases = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--chunk-overhang") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            opts->chunk_overhang = (unsigned)strtoul(argv[++i], NULL, 10);
+            continue;
+        }
+
+        if (strcmp(arg, "--twin-hot") == 0 || strcmp(arg, "--twin-regs") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            if (strcmp(arg, "--twin-hot") == 0)
+                opts->twin_hot = argv[++i];
+            else
+                opts->twin_regs = argv[++i];
             continue;
         }
 

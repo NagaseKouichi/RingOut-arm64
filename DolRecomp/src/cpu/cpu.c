@@ -323,6 +323,14 @@ static u32 exception_msr(u32 old_msr, u32 exception) {
     return next;
 }
 
+#if defined(DOLRECOMP_RAM_SITE_CHECK)
+/* --ram-bases census (see cpu.h): marked sites that addressed outside RAM. */
+unsigned long long g_dr_ram_site_misses = 0;
+__attribute__((destructor)) static void dr_ram_site_report(void) {
+    fprintf(stderr, "[ram-sites] out-of-RAM accesses at marked sites: %llu\n", g_dr_ram_site_misses);
+}
+#endif
+
 u64 mem_read64_slow(CPUState* cpu, u32 addr) {
     u32 avail;
     u8* host = resolve_addr(cpu, addr, &avail);
@@ -829,7 +837,7 @@ DOLRECOMP_PSQ_FI void psq_store_value(CPUState* cpu, u32 ea, u8 type, s32 scale,
     DOLRECOMP_RAM_LOCAL(cpu);
     switch (type) {
     case 0: {
-        f32 single = (f32)value;
+        f32 single = dolrecomp_cvt_single(value);
         mem_write32(cpu, ea, f32_is_denormal(single) ? 0u : f32_bits(single));
         break;
     }
@@ -1323,8 +1331,18 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
      * FPRF mask, so a flush arriving afterwards would overwrite them and
      * the frame hash diverges -- measured at frame 1280, one word at
      * 0x804072A4 differing by exactly bit 13. Flushing on entry restores
-     * the eager ordering. */
+     * the eager ordering.
+     *
+     * DOLRECOMP_FMA_LAZY (module-src MODULE_FMA_LAZY): only the NaN/inf paths
+     * below touch FPSCR outside the FPRF field, so the flush moves into them.
+     * The common finite path then leaves its own result pending exactly like
+     * the inline ops do, instead of materialising the previous op's FPRF on
+     * entry and classifying its own eagerly on exit -- both land in the same
+     * 0x1F<<12 field, which the next writer overwrites anyway. */
+#if !defined(DOLRECOMP_FMA_LAZY)
     ppc_fprf_flush(cpu);
+#endif
+    bool fma_special = false;
     f64 addend = subtract ? -b : b;
     f64 result;
 
@@ -1348,6 +1366,10 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
     }
 
     if (isnan(result)) {
+        fma_special = true;
+#if defined(DOLRECOMP_FMA_LAZY)
+        ppc_fprf_flush(cpu);
+#endif
         u32 invalid = 0;
         if (is_snan(a) || is_snan(b) || is_snan(c))
             invalid |= 0x01000000u;
@@ -1372,11 +1394,28 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
                 return false;
         }
     } else if (isinf(a) || isinf(b) || isinf(c)) {
+        fma_special = true;
+#if defined(DOLRECOMP_FMA_LAZY)
+        ppc_fprf_flush(cpu);
+#endif
         cpu->fpscr &= ~0x00006000u;
     }
 
     if (negative && !isnan(result))
         result = -result;
+#if defined(DOLRECOMP_FMA_LAZY)
+    if (!fma_special) {
+        /* Same classification ppc_fprf_materialize will apply: kind 1 is
+         * classify_f32((f32)value), kind 2 classify_f64(value). */
+        PPC_FPRF_TAG(0xFFFFFFFEu);
+        g_fprf_value = result;
+        g_fprf_kind = single ? 1u : 2u;
+        *output = result;
+        return true;
+    }
+#else
+    (void)fma_special;
+#endif
     set_fprf(cpu, single ? classify_f32((f32)result) : classify_f64(result));
     *output = result;
     return true;

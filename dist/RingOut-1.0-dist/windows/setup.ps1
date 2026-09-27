@@ -229,7 +229,19 @@ elseif ($DiscId -eq 'GRSJAF') {
     # and the comparison can never match. The idle PC protects itself.
     $LeaderCases = @('--leader-cases', '--direct-calls', '--self-calls')
 }
-& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto @LeaderCases "-j$jobs" (Join-Path $Work 'out')
+# Chunk overhang, as in setup.sh: US, Plus and PAL only (one chunk boundary on
+# those three falls inside a hot loop); not JP, whose layout does not straddle.
+if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--chunk-overhang', '512') }
+# RAM bases, as in setup.sh: stores based on r1, r2 or r13 (stack pointer and the
+# small-data bases) skip the RAM/MMIO range test. All four discs.
+if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--ram-bases', '1,2,13') }
+# Twin chunks, as in setup.sh: a fast copy of each chunk entered only at the
+# entry PCs a training run used (the list ships beside the profile), the
+# ordinary chunk as a cold fallback. A disc without a list builds as before.
+$Twin = @()
+$HotList = Join-Path $Here "module-src\profiles\$DiscId.hot"
+if (Test-Path $HotList) { $Twin = @('--twin-hot', $HotList, '--twin-regs', 'ratio') }
+& (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto @LeaderCases @Twin "-j$jobs" (Join-Path $Work 'out')
 if ($LASTEXITCODE -ne 0) { Die "Recompilation failed." }
 
 # gen_module_tables.py reads main.dol from alongside the generated sources.

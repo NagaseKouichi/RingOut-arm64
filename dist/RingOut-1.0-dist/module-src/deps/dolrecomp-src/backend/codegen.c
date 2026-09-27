@@ -1,5 +1,6 @@
 #include "backend/codegen.h"
 #include "backend/emitter.h"
+#include "backend/twin.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,36 @@ int emit_chunk_file(const ChunkJob* job) {
 
     fprintf(chunk, "// DolRecomp output\n");
     fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
-    emit_function(chunk, job->insts, job->count, job->func_addr);
+    if (twin_enabled()) {
+        /* Emit once into a scratch file, then write the cold and fast copies
+         * (see twin.c). tmpfile, not open_memstream: MinGW has no memstream. */
+        FILE* tmp = tmpfile();
+        long n;
+        char* text;
+        int ok;
+        if (!tmp) {
+            fprintf(stderr, "error: tmpfile failed for '%s'\n", job->path);
+            fclose(chunk);
+            return 0;
+        }
+        emit_function(tmp, job->insts, job->emit_count ? job->emit_count : job->count, job->count, job->func_addr);
+        n = ftell(tmp);
+        rewind(tmp);
+        text = (char*)malloc((size_t)n + 1);
+        ok = text && fread(text, 1, (size_t)n, tmp) == (size_t)n;
+        fclose(tmp);
+        if (ok) {
+            text[n] = 0;
+            ok = twin_write(chunk, text, (size_t)n, job->func_addr);
+        }
+        free(text);
+        if (!ok) {
+            fclose(chunk);
+            return 0;
+        }
+    } else {
+        emit_function(chunk, job->insts, job->emit_count ? job->emit_count : job->count, job->count, job->func_addr);
+    }
 
     if (fclose(chunk) != 0) {
         fprintf(stderr, "error: failed writing '%s'\n", job->path);

@@ -1,6 +1,7 @@
 Both modules carry the constant RAM bound, the chunk-entry ram local
-(MODULE_RAM_LOCAL) AND the unpacked CR (CPU ABI 4 -- they need a runtime
-built from the same commit or later), with MODULE_PSQ_FAST and MODULE_MEM_FAST on and the
+(MODULE_RAM_LOCAL), the unpacked CR (CPU ABI 4 -- they need a runtime
+built from that commit or later), and MODULE_PSQ_SIMD, MODULE_FMA_LAZY and
+MODULE_DC_LOCAL (all ON by default), with MODULE_PSQ_FAST and MODULE_MEM_FAST on and the
 retrained GRSEAF profile. Check the CPU with: grep -o avx2 /proc/cpuinfo
 
 gGRSEAF_recomp.so            -march=x86-64-v3, needs AVX2+FMA. Frame hash
@@ -8,7 +9,7 @@ gGRSEAF_recomp.so            -march=x86-64-v3, needs AVX2+FMA. Frame hash
                              the reference domain, identical to the modules the
                              published measurements were taken on. Use this one
                              unless the CPU cannot run it.
-                             .text 27,107,924
+                             .text 27,651,120
 
 gGRSEAF_recomp.v2-noavx2.so  -march=x86-64-v2, for a CPU without AVX2. PLAYS
                              CORRECTLY but is NOT hash-compatible: with no FMA
@@ -18,7 +19,7 @@ gGRSEAF_recomp.v2-noavx2.so  -march=x86-64-v2, for a CPU without AVX2. PLAYS
                              Replays, savestates and netplay will not match a
                              v3/native build. No flag fixes this -- the
                              reference itself uses hardware FMA.
-                             .text 27,201,280
+                             .text 27,701,756
                              Run it with:
                                ./RingOut --module <path>/gGRSEAF_recomp.v2-noavx2.so
 

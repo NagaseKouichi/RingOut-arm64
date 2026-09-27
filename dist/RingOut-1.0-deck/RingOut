@@ -17,6 +17,24 @@ HERE="$(dirname "$(readlink -f "$0")")"
 USER_DIR="$HERE/userdata"
 mkdir -p "$USER_DIR"
 
+# One instance per install. Two at once (a double launch is easy from a desktop
+# icon or Steam) write the same shader-cache files together; the blob they leave
+# behind is corrupt, and every later launch segfaults in the Vulkan driver
+# replaying it until the cache is deleted. Seen on the Deck 2026-09-25: two
+# starts in the same second, then crash after crash. The lock sits on fd 9,
+# which the game inherits, so it is held exactly as long as the game runs.
+# Taken BEFORE the log below is rotated, so a refused launch cannot clobber the
+# running game's launch.log either.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$USER_DIR/.instance.lock"
+    if ! flock -n 9; then
+        echo "Ring Out is already running from $HERE -- not starting a second copy." >&2
+        command -v notify-send >/dev/null 2>&1 &&
+            notify-send "Ring Out" "Already running -- not starting a second copy." 2>/dev/null
+        exit 1
+    fi
+fi
+
 # Steam discards stdout and stderr for a non-Steam shortcut, and Game Mode has
 # no terminal to print to in any case, so a failed launch shows up only as the
 # game opening and closing again with no reason given anywhere. Mirror the lot

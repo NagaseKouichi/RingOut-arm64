@@ -3,6 +3,7 @@
 #include "app/database.h"
 #include "app/paths.h"
 #include "app/pipeline.h"
+#include "backend/twin.h"
 #include "platform/fs.h"
 #include "platform/strutil.h"
 #include "frontend/container/dol.h"
@@ -34,6 +35,30 @@ int main(int argc, char** argv) {
     emit_set_llvm_backend(opts.llvm_backend);
     emit_set_chain_calls(opts.chain_calls != 0);
     emit_set_leader_cases(opts.leader_cases != 0);
+    emit_set_chunk_overhang(opts.chunk_overhang);
+    emit_set_preserve_none(opts.preserve_none != 0);
+    if (opts.ram_bases) {
+        u32 mask = 0;
+        const char* p = opts.ram_bases;
+        while (*p) {
+            char* end = NULL;
+            long r = strtol(p, &end, 10);
+            if (end == p || r < 1 || r > 31) {
+                fprintf(stderr, "error: bad --ram-bases list '%s'\n", opts.ram_bases);
+                return 1;
+            }
+            mask |= 1u << r;
+            p = end;
+            while (*p == ',' || *p == ' ') p++;
+        }
+        emit_set_ram_bases(mask);
+    }
+    if (opts.twin_hot) {
+        if (!twin_load_hot(opts.twin_hot) ||
+            !twin_set_regs(opts.twin_regs ? opts.twin_regs : "1,2,13,28,29,30,31"))
+            return 1;
+        fprintf(stderr, "twin chunks: %u hot entry PCs from %s\n", twin_hot_count(), opts.twin_hot);
+    }
     emit_set_direct_calls(opts.direct_calls != 0);
     emit_set_self_calls(opts.self_calls != 0);
     emit_set_tail_calls(opts.tail_calls != 0);

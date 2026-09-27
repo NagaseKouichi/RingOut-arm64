@@ -24,7 +24,10 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 void emit_set_chunk_table(const u32* starts, u32 count);
 
 // emit a single recompiled function as C code
-void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
+/* insts[0, own) are the chunk's window: its entry cases, its dispatch-table
+ * range. insts[own, count) are an overhang: the following chunk's code, emitted
+ * again as plain labels so control that runs past the window stays here. */
+void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func_addr);
 
 /* Guest PC of an OS idle spin loop, if the host skips it (see --idle-pc).
  * Back-edges to it are emitted as dispatcher returns so the host still sees it. */
@@ -46,6 +49,17 @@ void emit_set_chain_calls(bool enable);
 /* Reduced chunk-entry switch (--leader-cases): cases only where control can
    actually arrive. See emitter.c for the entry rule and its evidence. */
 void emit_set_leader_cases(bool enable);
+void emit_set_chunk_overhang(u32 max_insts);
+/* bit i: D-form accesses based on guest ri can only reach main RAM. */
+void emit_set_ram_bases(u32 mask);
+void emit_set_preserve_none(bool enable);
+bool emit_preserve_none_enabled(void);
+/* "DOLRECOMP_CHUNK_FN " under --preserve-none, else "". */
+const char* emit_chunk_cc(void);
+/* How many instructions after insts[own] a chunk may take as its overhang.
+ * MAIN THREAD (pipeline). */
+u32 emit_overhang_length(const PPCInst* insts, u32 own, u32 available,
+                         const u32* stop_ranges, u32 stop_range_count);
 
 /* Program-wide entry targets for --leader-cases: every direct branch target in
    any code section plus every data word pointing into code. Copied. MAIN THREAD

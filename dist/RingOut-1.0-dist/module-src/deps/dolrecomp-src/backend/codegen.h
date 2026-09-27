@@ -25,7 +25,8 @@
 
 typedef struct {
     const PPCInst* insts;
-    u32 count;
+    u32 count;         /* the window */
+    u32 emit_count;    /* window + overhang; 0 = none */
     u32 func_addr;
     char path[1200];
     char include_name[512];

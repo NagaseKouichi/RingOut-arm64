@@ -44,7 +44,7 @@ static char* emit_loop_to_string(void) {
 
     FILE* f = tmpfile();
     if (!f) { perror("tmpfile"); return NULL; }
-    emit_function(f, insts, 2u, BASE);
+    emit_function(f, insts, 2u, 2u, BASE);
 
     long n = ftell(f);
     if (n < 0) { fclose(f); return NULL; }
@@ -80,7 +80,7 @@ int main(void) {
         free(plain);
         return 2;
     }
-    if (!strstr(back_edge(plain), "ctx->downcount <= -")) {
+    if (!strstr(back_edge(plain), "DOLRECOMP_DC <= -")) {
         fprintf(stderr, "native loop has no budget check -- it could spin unbounded:\n%s\n", plain);
         free(plain);
         return 3;

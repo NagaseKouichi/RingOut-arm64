@@ -30,6 +30,18 @@ function Report($msg) {
     } catch { }
 }
 
+# One instance per install, as in the Linux launcher: two at once write the same
+# shader-cache files together and leave a corrupt blob that crashes every later
+# launch. An exclusive handle on a lock file is held for as long as this script
+# runs, which is as long as the game does (it runs in the foreground below).
+try {
+    $script:InstanceLock = [System.IO.File]::Open((Join-Path $UserDir '.instance.lock'),
+        [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+} catch {
+    Report "Ring Out is already running from $Here -- not starting a second copy."
+    exit 1
+}
+
 function Pick-Iso {
     try {
         Add-Type -AssemblyName System.Windows.Forms

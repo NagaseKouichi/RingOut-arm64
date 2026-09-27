@@ -181,6 +181,30 @@ static void emit_fcompare(FILE* out, const PPCInst* inst) {
     fprintf(out, "    }\n");
 }
 
+/* --ram-bases: base registers whose D-form accesses can only reach main RAM
+ * (the stack pointer, the small-data bases). Such a site opens its block with
+ * `enum { dr_ram_site = 1 };`, which cpu.h turns into an unchecked access at
+ * parse time; every other site is emitted exactly as before. */
+static u32 s_ram_bases = 0;
+
+/* --preserve-none: every chunk function (definition, prototype, the dispatch
+ * typedef and each local declaration) carries DOLRECOMP_CHUNK_FN, which cpu.h
+ * turns into __attribute__((preserve_none)) where the compiler has it. A chunk
+ * then saves none of the callee-saved registers it uses: on the Deck profile
+ * each of ~1.6 G chunk calls per US run pushed and popped six. All of them or
+ * none -- a call through a mismatched declaration corrupts registers. */
+static bool s_preserve_none = false;
+void emit_set_preserve_none(bool enable) { s_preserve_none = enable; }
+bool emit_preserve_none_enabled(void) { return s_preserve_none; }
+const char* emit_chunk_cc(void) { return s_preserve_none ? "DOLRECOMP_CHUNK_FN " : ""; }
+void emit_set_ram_bases(u32 mask) { s_ram_bases = mask; }
+
+static void emit_ea_open(FILE* out, u8 ra, bool update) {
+    if ((ra != 0 || update) && (s_ram_bases >> ra & 1u))
+        fprintf(out, "        enum { dr_ram_site = 1 };\n");
+    fprintf(out, "        u32 ea = ");
+}
+
 static void emit_dform_ea(FILE* out, u8 ra, s16 simm, bool update) {
     if (ra == 0 && !update) {
         fprintf(out, "(u32)(s32)(%d)", (int)simm);
@@ -200,7 +224,7 @@ static void emit_xform_ea(FILE* out, u8 ra, u8 rb, bool update) {
 static void emit_load(FILE* out, const PPCInst* inst, const char* read_expr,
                       bool update) {
     fprintf(out, "    {\n");
-    fprintf(out, "        u32 ea = ");
+    emit_ea_open(out, inst->rA, update);
     emit_dform_ea(out, inst->rA, inst->simm, update);
     fprintf(out, ";\n");
     fprintf(out, "        ctx->gpr[%u] = %s;\n", inst->rD, read_expr);
@@ -226,7 +250,7 @@ static void emit_loadx(FILE* out, const PPCInst* inst, const char* read_expr,
 static void emit_store(FILE* out, const PPCInst* inst, const char* write_func,
                        const char* cast_type, bool update) {
     fprintf(out, "    {\n");
-    fprintf(out, "        u32 ea = ");
+    emit_ea_open(out, inst->rA, update);
     emit_dform_ea(out, inst->rA, inst->simm, update);
     fprintf(out, ";\n");
     fprintf(out, "        %s(ctx, ea, (%s)ctx->gpr[%u]);\n",
@@ -254,7 +278,7 @@ static void emit_storex(FILE* out, const PPCInst* inst, const char* write_func,
 static void emit_fload(FILE* out, const PPCInst* inst, bool single,
                        bool update) {
     fprintf(out, "    {\n");
-    fprintf(out, "        u32 ea = ");
+    emit_ea_open(out, inst->rA, update);
     emit_dform_ea(out, inst->rA, inst->simm, update);
     fprintf(out, ";\n");
     if (single) {
@@ -294,11 +318,11 @@ static void emit_floadx(FILE* out, const PPCInst* inst, bool single,
 static void emit_fstore(FILE* out, const PPCInst* inst, bool single,
                         bool update) {
     fprintf(out, "    {\n");
-    fprintf(out, "        u32 ea = ");
+    emit_ea_open(out, inst->rA, update);
     emit_dform_ea(out, inst->rA, inst->simm, update);
     fprintf(out, ";\n");
     if (single) {
-        fprintf(out, "        mem_write32(ctx, ea, dolrecomp_f32_to_bits((f32)ctx->fpr[%u]));\n",
+        fprintf(out, "        mem_write32(ctx, ea, dolrecomp_store_single(ctx->fpr[%u]));\n",
                 inst->rS);
     } else {
         fprintf(out, "        mem_write64(ctx, ea, dolrecomp_f64_to_bits(ctx->fpr[%u]));\n",
@@ -317,7 +341,7 @@ static void emit_fstorex(FILE* out, const PPCInst* inst, bool single,
     emit_xform_ea(out, inst->rA, inst->rB, update);
     fprintf(out, ";\n");
     if (single) {
-        fprintf(out, "        mem_write32(ctx, ea, dolrecomp_f32_to_bits((f32)ctx->fpr[%u]));\n",
+        fprintf(out, "        mem_write32(ctx, ea, dolrecomp_store_single(ctx->fpr[%u]));\n",
                 inst->rS);
     } else {
         fprintf(out, "        mem_write64(ctx, ea, dolrecomp_f64_to_bits(ctx->fpr[%u]));\n",
@@ -572,6 +596,62 @@ static bool must_reach_dispatcher(u32 pc) {
     return false;
 }
 
+/* ---- chunk overhang (--chunk-overhang) ------------------------------------
+ *
+ * Chunks are fixed 4096-instruction windows, so a boundary can fall anywhere,
+ * including inside a loop. Measured on the US disc: the loop at 0x8000D8D0 -
+ * 0x8000D96C straddles the chunk boundary at 0x8000D940, so every iteration
+ * falls off one chunk and branches back out of the other -- two dispatcher
+ * round trips per iteration, 13% of all chunk entries on the arcade route.
+ *
+ * An overhang lets a chunk carry on past its window as plain labels, up to the
+ * first instruction that cannot fall through, so such a loop closes inside one
+ * chunk. The overhang has no entry cases and is not in the dispatch table: the
+ * next chunk still owns those addresses. It stops early at anything that must
+ * be seen by the chassis: a hooked or idle PC (only BRANCHES to those are
+ * forced out), and embedded data. The budget is an upper bound: an overhang
+ * that would run out of it before an exit is not taken at all. */
+static u32 s_overhang_max = 0;
+/* End of the window of the chunk being emitted: calls INTO the overhang go to
+   the owning chunk, whose switch has the case. Per worker thread. */
+static DR_THREAD_LOCAL u32 s_own_end = 0;
+
+void emit_set_chunk_overhang(u32 max_insts) { s_overhang_max = max_insts; }
+
+static bool inst_never_falls_through(const PPCInst* inst) {
+    switch (inst->op) {
+    case PPC_OP_B:
+        return !inst->lk;
+    case PPC_OP_BCLR:
+    case PPC_OP_BCCTR:
+        return !inst->lk && (inst->bo & 0x14u) == 0x14u;
+    case PPC_OP_RFI:
+    case PPC_OP_SC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+u32 emit_overhang_length(const PPCInst* insts, u32 own, u32 available,
+                         const u32* stop_ranges, u32 stop_range_count) {
+    u32 n;
+    for (n = 0; n < available && n < s_overhang_max; n++) {
+        const PPCInst* inst = &insts[own + n];
+        u32 r;
+        if (inst->embedded_data || must_reach_dispatcher(inst->address))
+            return n;
+        for (r = 0; r < stop_range_count; r++)
+            if (inst->address >= stop_ranges[2 * r] && inst->address <= stop_ranges[2 * r + 1])
+                return n;
+        if (inst_never_falls_through(inst))
+            return n + 1u;
+    }
+    /* Ran out of budget before an exit: an overhang that falls off its own end
+       gains nothing over the dispatch it replaces. */
+    return 0;
+}
+
 /* Cycles charged for the remainder of the current instruction's block: every
  * instruction after this one, up to the end of the block.
  *
@@ -591,10 +671,10 @@ static DR_THREAD_LOCAL u32 s_block_suffix = 0;
 /* `if (ctx->exception) return;` plus the refund. */
 static void emit_exc_check_return(FILE* out, const char* indent) {
     if (s_block_suffix != 0)
-        fprintf(out, "%sif (ctx->exception) { ctx->downcount += %u; return; }\n",
+        fprintf(out, "%sif (ctx->exception) { DOLRECOMP_DC += %u; DOLRECOMP_RETURN; }\n",
                 indent, s_block_suffix);
     else
-        fprintf(out, "%sif (ctx->exception) return;\n", indent);
+        fprintf(out, "%sif (ctx->exception) DOLRECOMP_RETURN;\n", indent);
 }
 
 static int s_llvm_backend = 0;
@@ -727,11 +807,13 @@ static bool emit_cross_chunk_tail(FILE* out, const PPCInst* inst, u32 func_start
         return false;
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
     fprintf(out, "            if (dolrecomp_call_enter()) {\n");
-    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                %svoid func_%08X(CPUState* ctx);\n", emit_chunk_cc(), target_chunk);
+    fprintf(out, "                DOLRECOMP_DC_FLUSH(ctx);\n");
     fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                DOLRECOMP_DC_RELOAD(ctx);\n");
     fprintf(out, "                dolrecomp_call_leave();\n");
     fprintf(out, "            }\n");
-    fprintf(out, "            return;\n");
+    fprintf(out, "            DOLRECOMP_RETURN;\n");
     return true;
 }
 
@@ -740,7 +822,7 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst, u32 func_start
     u32 target_chunk;
     if (!s_direct_calls || must_reach_dispatcher(inst->branch_target))
         return false;
-    if (branch_target_is_local(func_start, func_end, inst->branch_target))
+    if (branch_target_is_local(func_start, s_own_end ? s_own_end : func_end, inst->branch_target))
         target_chunk = s_self_calls ? func_start : 0u;
     else
         target_chunk = chunk_start_for(inst->branch_target);
@@ -751,13 +833,15 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst, u32 func_start
         return false;
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
     fprintf(out, "            if (dolrecomp_call_enter()) {\n");
-    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                %svoid func_%08X(CPUState* ctx);\n", emit_chunk_cc(), target_chunk);
+    fprintf(out, "                DOLRECOMP_DC_FLUSH(ctx);\n");
     fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                DOLRECOMP_DC_RELOAD(ctx);\n");
     fprintf(out, "                dolrecomp_call_leave();\n");
     fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n", continuation, continuation);
     fprintf(out, "            }\n");
     emit_exit_stat(out, "            ", "CALL_MISS");
-    fprintf(out, "            return;\n");
+    fprintf(out, "            DOLRECOMP_RETURN;\n");
     return true;
 }
 
@@ -776,9 +860,9 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
         if (s_chain_calls && local_target &&
             !must_reach_dispatcher(inst->branch_target)) {
             if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
+                fprintf(out, "            if (DOLRECOMP_DC <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
-                fprintf(out, "                return;\n");
+                fprintf(out, "                DOLRECOMP_RETURN;\n");
                 fprintf(out, "            }\n");
             }
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
@@ -788,14 +872,14 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
             return;
         emit_exit_stat(out, "            ", local_target ? "BL_LOCAL" : "BL_CROSS");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-        fprintf(out, "            return;\n");
+        fprintf(out, "            DOLRECOMP_RETURN;\n");
         return;
     }
     /* The idle loop must keep reaching the chassis, or idle-skip dies with it. */
     if (local_backward && must_reach_dispatcher(inst->branch_target)) {
         emit_exit_stat(out, "            ", "IDLE");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-        fprintf(out, "            return;\n");
+        fprintf(out, "            DOLRECOMP_RETURN;\n");
         return;
     }
     if (local_backward) {
@@ -811,10 +895,10 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
          * hand control back exactly as before, so this only ever shortens the
          * time between dispatches, never lengthens it beyond DOLRECOMP_LOOP_BUDGET
          * cycles. */
-        fprintf(out, "            if (ctx->downcount <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
+        fprintf(out, "            if (DOLRECOMP_DC <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
         emit_exit_stat(out, "                ", "LOOP_BUDGET");
         fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
-        fprintf(out, "                return;\n");
+        fprintf(out, "                DOLRECOMP_RETURN;\n");
         fprintf(out, "            }\n");
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
     } else if (local_target) {
@@ -822,7 +906,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
     } else if (!emit_cross_chunk_tail(out, inst, func_start)) {
         emit_exit_stat(out, "            ", "B_CROSS");
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-        fprintf(out, "            return;\n");
+        fprintf(out, "            DOLRECOMP_RETURN;\n");
     }
 }
 
@@ -839,7 +923,7 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
                    strstr(target_expr, "lr") ? (inst->lk ? "BLRL" : "BLR")
                                              : (inst->lk ? "BCTRL" : "BCTR"));
     fprintf(out, "            ctx->pc = target;\n");
-    fprintf(out, "            return;\n");
+    fprintf(out, "            DOLRECOMP_RETURN;\n");
     fprintf(out, "        }\n");
     fprintf(out, "    }\n");
 }
@@ -1152,10 +1236,10 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     if (ppc_op_uses_fpu(inst->op)) {
         if (s_block_suffix != 0) {
             fprintf(out,
-                    "    if (!ppc_fp_available(ctx, 0x%08Xu)) { ctx->downcount += %u; return; }\n",
+                    "    if (!ppc_fp_available(ctx, 0x%08Xu)) { DOLRECOMP_DC += %u; DOLRECOMP_RETURN; }\n",
                     inst->address, s_block_suffix);
         } else {
-            fprintf(out, "    if (!ppc_fp_available(ctx, 0x%08Xu)) return;\n", inst->address);
+            fprintf(out, "    if (!ppc_fp_available(ctx, 0x%08Xu)) DOLRECOMP_RETURN;\n", inst->address);
         }
     }
 
@@ -2248,7 +2332,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
             fprintf(out, "            if (reg == %uu || reg == %uu) {\n", inst->rA, inst->rB);
             fprintf(out, "                ppc_program_exception(ctx, PPC_PROGRAM_ILLEGAL, 0x%08Xu);\n",
                     inst->address);
-            fprintf(out, "                return;\n");
+            fprintf(out, "                DOLRECOMP_RETURN;\n");
             fprintf(out, "            }\n");
             fprintf(out, "        }\n");
         } else {
@@ -2338,9 +2422,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_ICBI:
+        fprintf(out, "    DOLRECOMP_DC_FLUSH(ctx);\n");
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                 inst->raw, inst->address);
-        fprintf(out, "    return;\n");
+        fprintf(out, "    DOLRECOMP_DC_RELOAD(ctx);\n");
+        fprintf(out, "    DOLRECOMP_RETURN;\n");
         break;
 
     case PPC_OP_DCBTST:
@@ -2350,7 +2436,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_LMW:
         fprintf(out, "    {\n");
-        fprintf(out, "        u32 ea = ");
+        emit_ea_open(out, inst->rA, false);
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
         fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) ctx->gpr[r] = mem_read32(ctx, ea);\n",
@@ -2360,7 +2446,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_STMW:
         fprintf(out, "    {\n");
-        fprintf(out, "        u32 ea = ");
+        emit_ea_open(out, inst->rA, false);
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
         fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) mem_write32(ctx, ea, ctx->gpr[r]);\n",
@@ -2399,7 +2485,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "    if (ppc_trap_condition(%uu, ctx->gpr[%u], (u32)(s32)%d)) {\n",
                 inst->to, inst->rA, (int)inst->simm);
         fprintf(out, "        ppc_program_exception(ctx, PPC_PROGRAM_TRAP, 0x%08Xu);\n", inst->address);
-        fprintf(out, "        return;\n");
+        fprintf(out, "        DOLRECOMP_RETURN;\n");
         fprintf(out, "    }\n");
         break;
 
@@ -2407,18 +2493,18 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "    if (ppc_trap_condition(%uu, ctx->gpr[%u], ctx->gpr[%u])) {\n",
                 inst->to, inst->rA, inst->rB);
         fprintf(out, "        ppc_program_exception(ctx, PPC_PROGRAM_TRAP, 0x%08Xu);\n", inst->address);
-        fprintf(out, "        return;\n");
+        fprintf(out, "        DOLRECOMP_RETURN;\n");
         fprintf(out, "    }\n");
         break;
 
     case PPC_OP_SC:
         fprintf(out, "    ppc_system_call_exception(ctx, 0x%08Xu);\n", inst->address);
-        fprintf(out, "    return;\n");
+        fprintf(out, "    DOLRECOMP_RETURN;\n");
         break;
 
     case PPC_OP_RFI:
         fprintf(out, "    ppc_rfi(ctx, 0x%08Xu);\n", inst->address);
-        fprintf(out, "    return;\n");
+        fprintf(out, "    DOLRECOMP_RETURN;\n");
         break;
 
     case PPC_OP_CRAND:  emit_cr_logical(out, inst, "a & b"); break;
@@ -2528,9 +2614,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 282: fprintf(out, "    ctx->gpr[%u] = ctx->ear;\n", inst->rD); break;
         case 920: fprintf(out, "    ctx->gpr[%u] = ctx->hid2;\n", inst->rD); break;
         default:
+            fprintf(out, "    DOLRECOMP_DC_FLUSH(ctx);\n");
             fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                     inst->raw, inst->address);
-            fprintf(out, "    return;\n");
+            fprintf(out, "    DOLRECOMP_DC_RELOAD(ctx);\n");
+            fprintf(out, "    DOLRECOMP_RETURN;\n");
             break;
         }
         break;
@@ -2553,9 +2641,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 919: fprintf(out, "    ctx->gqr[7] = ctx->gpr[%u];\n", inst->rS); break;
         case 920: fprintf(out, "    ctx->hid2 = ctx->gpr[%u];\n", inst->rS); break;
         default:
+            fprintf(out, "    DOLRECOMP_DC_FLUSH(ctx);\n");
             fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                     inst->raw, inst->address);
-            fprintf(out, "    return;\n");
+            fprintf(out, "    DOLRECOMP_DC_RELOAD(ctx);\n");
+            fprintf(out, "    DOLRECOMP_RETURN;\n");
             break;
         }
         break;
@@ -2595,9 +2685,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     default:
+        fprintf(out, "    DOLRECOMP_DC_FLUSH(ctx);\n");
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                 inst->raw, inst->address);
-        fprintf(out, "    return;\n");
+        fprintf(out, "    DOLRECOMP_DC_RELOAD(ctx);\n");
+        fprintf(out, "    DOLRECOMP_RETURN;\n");
         break;
     }
 
@@ -2885,14 +2977,24 @@ void emit_collect_entry_points(const PPCInst* insts, u32 count, u32 func_addr) {
     free(leader);
 }
 
-void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func_addr) {
     u32 i;
     u32 func_end = func_addr + count * 4u;
 
     u8* leader = (u8*)calloc(count ? count : 1u, sizeof(u8));
+    u8* entry = (u8*)calloc(own ? own : 1u, sizeof(u8));
     u32* block_cost = (u32*)calloc(count ? count : 1u, sizeof(u32));
 
     compute_leaders(insts, count, func_addr, leader);
+    /* The switch's cases are the WINDOW's leaders, computed exactly as
+       emit_collect_entry_points() does, so the switch and the dispatch table
+       still agree. With an overhang the whole range's leaders only add labels
+       and block splits; the window's end is a leader, as it is in the owning
+       chunk, so the owner's blocks are charged the same way. */
+    compute_leaders(insts, own, func_addr, entry);
+    if (own < count)
+        leader[own] = 1;
+    s_own_end = func_addr + own * 4u;
 
     u8* ca_live = NULL;
     if ((s_ca_liveness || s_ca_elide) && count) {
@@ -2937,17 +3039,20 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
             suffix[j] = (j == last) ? 0u : suffix[j + 1u] + inst_cycle_cost(&insts[j + 1u]);
     }
 
-    fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    fprintf(out, "%svoid func_%08X(CPUState* ctx) {\n", emit_chunk_cc(), func_addr);
     /* Caches ctx->ram in a local for the whole chunk. Expands to nothing unless
        the module is built with MODULE_RAM_LOCAL, so the same generated tree
        builds both arms of the A/B (see DOLRECOMP_RAM_LOCAL in cpu.h). */
     fprintf(out, "    DOLRECOMP_RAM_LOCAL(ctx);\n");
+    /* Keeps the cycle charge in a local for the whole chunk (DOLRECOMP_DC_LOCAL
+       in cpu.h); a no-op unless the module is built with MODULE_DC_LOCAL. */
+    fprintf(out, "    DOLRECOMP_DC_LOCAL(ctx);\n");
     /* Not worth lowering differently: an index switch with every index a case
        (one jump table instead of clang's compare tree) measured -0.04% cycles
        on the US disc. The entry cost is the indirect jump and the prologue. */
     fprintf(out, "    switch (ctx->pc) {\n");
-    for (i = 0; i < count; i++) {
-        if (s_leader_cases && !leader[i] && !is_extra_entry(&insts[i]))
+    for (i = 0; i < own; i++) {
+        if (s_leader_cases && !entry[i] && !is_extra_entry(&insts[i]))
             continue;
         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
                 insts[i].address, insts[i].address);
@@ -2957,9 +3062,9 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
        uncounted hid ~49 M dispatches: the instrumented total fell while the
        chassis kept dispatching just as often. */
     if (s_exit_stats)
-        fprintf(out, "    default: dolrecomp_exit_stat(DR_EXIT_SWITCH_MISS); return;\n");
+        fprintf(out, "    default: dolrecomp_exit_stat(DR_EXIT_SWITCH_MISS); DOLRECOMP_RETURN;\n");
     else
-        fprintf(out, "    default: return;\n");
+        fprintf(out, "    default: DOLRECOMP_RETURN;\n");
     fprintf(out, "    }\n");
 
     for (i = 0; i < count; i++) {
@@ -2975,7 +3080,7 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         if (leader[i]) {
             fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
             if (block_cost[i] != 0)
-                fprintf(out, "    ctx->downcount -= %u;\n", block_cost[i]);
+                fprintf(out, "    DOLRECOMP_DC -= %u;\n", block_cost[i]);
         }
         s_block_suffix = suffix[i];
         /* live_out[i] is "is CA live AFTER instruction i", so a defining
@@ -2990,9 +3095,15 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
 
     free(ca_live);
     free(leader);
+    free(entry);
     free(block_cost);
+    s_own_end = 0;
     free(suffix);
 
     fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
+    /* Falling off the end is a return too: without this the DC_LOCAL charge of
+       the chunk's last blocks was dropped (frame hash 5a2213402c34, not
+       4217c7669322). With MODULE_DC_LOCAL off this is a plain `return;`. */
+    fprintf(out, "    DOLRECOMP_RETURN;\n");
     fprintf(out, "}\n\n");
 }

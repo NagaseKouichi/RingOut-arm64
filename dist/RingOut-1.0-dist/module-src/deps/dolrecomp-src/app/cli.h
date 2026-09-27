@@ -27,6 +27,11 @@ typedef struct {
     u32 dispatch_pc_count;
     int chain_calls;
     int leader_cases;
+    unsigned chunk_overhang; // --chunk-overhang <max>: emit past the window to the first exit
+    const char* ram_bases;   // --ram-bases <list>: base registers that only address RAM
+    int preserve_none;       // --preserve-none: chunk functions save no callee-saved registers
+    const char* twin_hot;   // --twin-hot <file>: hot entry PCs -> twin chunks
+    const char* twin_regs;  // --twin-regs <list>: guest registers kept in locals
     int direct_calls;   // --direct-calls
     int self_calls;     // --self-calls (needs --direct-calls)
     int tail_calls;     // --tail-calls (needs --direct-calls)

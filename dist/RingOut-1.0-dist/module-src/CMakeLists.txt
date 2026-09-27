@@ -85,6 +85,30 @@ endif()
 # serves both. ON by default: measured -1.18% cycles, -1.63% instructions and
 # -4.1% .text on the US disc, frame hash unchanged.
 option(MODULE_RAM_LOCAL "Cache ctx->ram in a chunk-entry local" ON)
+# Both lanes of a type-0 psq_l/psq_st through one SSE register (see
+# DOLRECOMP_PSQ_SIMD in cpu.h). Needs SSSE3; without it the macro is inert.
+# ON by default: -0.59% cycles, -1.45% instructions on the US disc alone.
+option(MODULE_PSQ_SIMD "Paired-single loads/stores two lanes at a time" ON)
+if(MODULE_PSQ_SIMD)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_PSQ_SIMD)
+endif()
+# ppc_fma leaves its FPRF pending on the finite path instead of flushing the
+# previous one and classifying its own eagerly (DOLRECOMP_FMA_LAZY in cpu.c).
+# ON by default: -0.51% cycles, -1.14% instructions on the US disc alone.
+option(MODULE_FMA_LAZY "Lazy FPRF for the out-of-line fma helper" ON)
+if(MODULE_FMA_LAZY)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_FMA_LAZY)
+endif()
+# Keep the cycle charge in a chunk local (DOLRECOMP_DC_LOCAL in cpu.h). The
+# generated code uses the macros unconditionally, so one tree builds both arms.
+# ON by default: -0.98% cycles on the US disc alone (a latency win; the
+# instruction count is flat). The three together, both arms PGO-retrained,
+# 16000 frames of arcade-match, frame hashes identical: US -2.32%, JP -1.56%,
+# Plus -1.42%, PAL -1.77% cycles.
+option(MODULE_DC_LOCAL "Keep the downcount charge in a chunk local" ON)
+if(MODULE_DC_LOCAL)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_DC_LOCAL_ENABLE)
+endif()
 if(MODULE_RAM_LOCAL)
   target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_RAM_LOCAL_ENABLE)
 endif()
@@ -455,7 +479,15 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   set(MODULE_PATH_MAP -ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/ringout)
 endif()
 
+# Semantic interposition is an ELF concept: a PE DLL has no PLT to bounce
+# through, so on Windows clang ignores the flag and says so once per chunk
+# ("argument unused during compilation"), over 100 times per setup run.
+set(MODULE_INTERPOSITION_FLAG)
+if(NOT WIN32)
+  set(MODULE_INTERPOSITION_FLAG -fno-semantic-interposition)
+endif()
+
 target_compile_options(${MODULE_NAME} PRIVATE
-  ${MODULE_LTO_FLAG} -fvisibility=hidden -fno-semantic-interposition
+  ${MODULE_LTO_FLAG} -fvisibility=hidden ${MODULE_INTERPOSITION_FLAG}
   -ffp-contract=off ${MODULE_PATH_MAP})
 target_link_options(${MODULE_NAME} PRIVATE ${MODULE_LTO_FLAG})

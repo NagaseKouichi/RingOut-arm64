@@ -68,7 +68,7 @@ static char* emit_raws_to_string(const u32* words, u32 count, u32 base) {
     }
     FILE* f = tmpfile();
     if (!f) return NULL;
-    emit_function(f, insts, count, base);
+    emit_function(f, insts, count, count, base);
     long n = ftell(f);
     if (n < 0) { fclose(f); return NULL; }
     rewind(f);
@@ -357,6 +357,55 @@ int main(void) {
             free(hdr);
         }
         emit_set_no_reservation(false);
+    }
+
+    /* --chunk-overhang: code after the window is emitted as labels only. The
+       window's switch must not grow a case for it (the dispatch table does not
+       send those PCs here), and a branch from the overhang back INTO the window
+       -- the straddling loop this exists for -- must become a local goto. The
+       overhang must end at an exit, not run out of budget, and must never
+       swallow a PC the run loop hooks. Runs LAST: it registers a dispatch PC. */
+    {
+        static const u32 ov_raws[] = {
+            0x60000000u,  /* 80005000 nop                 window, leader      */
+            0x60000000u,  /* 80005004 nop                 window, loop head   */
+            0x60000000u,  /* 80005008 nop                 overhang            */
+            0x4200FFF8u,  /* 8000500C bdnz 0x80005004     back into the window */
+            0x4E800020u,  /* 80005010 blr                 the exit            */
+        };
+        PPCInst ov[5];
+        for (u32 i = 0; i < 5u; i++)
+            ov[i] = ppc_decode(ov_raws[i], 0x80005000u + i * 4u);
+
+        emit_set_chunk_overhang(16u);
+        expect("overhang runs to the first exit, inclusive",
+               emit_overhang_length(ov, 2u, 3u, NULL, 0u) == 3u, NULL);
+        emit_set_chunk_overhang(2u);
+        expect("an overhang that runs out of budget before an exit is not taken",
+               emit_overhang_length(ov, 2u, 3u, NULL, 0u) == 0u, NULL);
+        emit_set_chunk_overhang(16u);
+
+        FILE* f = tmpfile();
+        if (!f) return 1;
+        emit_function(f, ov, 5u, 2u, 0x80005000u);
+        long n = ftell(f);
+        rewind(f);
+        char* text = (char*)calloc((size_t)n + 1u, 1u);
+        if (!text || fread(text, 1u, (size_t)n, f) != (size_t)n) { fclose(f); free(text); return 1; }
+        fclose(f);
+        expect("the window keeps its case", has_case(text, 0x80005000u), text);
+        expect("no case for an overhang PC (80005008)", !has_case(text, 0x80005008u), text);
+        expect("no case for an overhang PC (8000500C)", !has_case(text, 0x8000500Cu), text);
+        expect("the overhang is emitted as labels", strstr(text, "label_8000500C:") != NULL, text);
+        const char* be = strstr(text, "label_8000500C:");
+        expect("the back-edge into the window is a local goto",
+               be && strstr(be, "goto label_80005004;") != NULL, text);
+        free(text);
+
+        emit_add_dispatch_pc(0x80005008u);
+        expect("the overhang stops before a PC the run loop must see",
+               emit_overhang_length(ov, 2u, 3u, NULL, 0u) == 0u, NULL);
+        emit_set_chunk_overhang(0u);
     }
 
     return failures ? 1 : 0;

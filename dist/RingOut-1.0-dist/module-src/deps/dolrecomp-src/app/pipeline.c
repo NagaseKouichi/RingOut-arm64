@@ -1038,6 +1038,19 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             job->insts = insts + start;
             job->count = chunk_count;
             job->func_addr = func_addr;
+            /* --chunk-overhang: the window plus the following code up to its
+               first exit (see emit_overhang_length). The SMC report lists the
+               sites of POSSIBLE patching stores, not what they patch, so it is
+               no reason to stop: overhang code is verified exactly as any other
+               in-chunk code is, at the dispatch that entered the chunk. */
+            job->emit_count = 0;
+            if (start + chunk_count < num_insts) {
+                u32 extra = emit_overhang_length(insts + start, chunk_count,
+                                                 num_insts - (start + chunk_count),
+                                                 NULL, 0);
+                if (extra)
+                    job->emit_count = chunk_count + extra;
+            }
 
             if (!join_path(job->path, sizeof(job->path), chunks_dir, chunk_name)) {
                 fprintf(stderr, "error: chunk path is too long\n");

@@ -18,14 +18,16 @@ endif()
 if(NOT generated_source MATCHES "#ifndef RECOMP_GENERATED_H")
     message(FATAL_ERROR "generated header has no include guard")
 endif()
-if(NOT generated_source MATCHES "ctx->downcount -=")
+# The charge goes through DOLRECOMP_DC (ctx->downcount, or a chunk local with
+# MODULE_DC_LOCAL), so match the macro the emitter writes.
+if(NOT generated_source MATCHES "DOLRECOMP_DC -=")
     message(FATAL_ERROR "generated code has no guest cycle charges")
 endif()
 # The gate may carry a block suffix that restores downcount before returning
-# ("{ ctx->downcount += N; return; }"), which it does whenever the instruction
+# ("{ DOLRECOMP_DC += N; DOLRECOMP_RETURN; }"), which it does whenever the instruction
 # sits inside a counted block. Match the gate, not one of its two tails -- the
 # bare-return form alone went stale when that suffix was added.
-if(NOT generated_source MATCHES "if \\(!ppc_fp_available\\(ctx, 0x8000317Cu\\)\\)[^\n]*return;")
+if(NOT generated_source MATCHES "if \\(!ppc_fp_available\\(ctx, 0x8000317Cu\\)\\)[^\n]*RETURN;")
     message(FATAL_ERROR "generated floating-point code has no MSR FP gate")
 endif()
 # dcbf/dcbst/dcbi are deliberately no-ops: there is no data cache in a flat

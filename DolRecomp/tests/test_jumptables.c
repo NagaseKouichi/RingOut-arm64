@@ -87,7 +87,7 @@ static char* emit_program_to_string(const u32 raw[INST_COUNT]) {
     if (!f)
         return NULL;
 
-    emit_function(f, insts, INST_COUNT, BASE);
+    emit_function(f, insts, INST_COUNT, INST_COUNT, BASE);
     fflush(f);
 
     long size = ftell(f);
@@ -132,7 +132,7 @@ static void test_codegen_supports_jumptable(const char* code) {
     check(strstr(code, "ctx->ctr & ~3u") != NULL,
           "bctr lowers to a computed target from CTR");
     check(strstr(code, "ctx->pc = target;") != NULL &&
-          strstr(code, "return;") != NULL,
+          strstr(code, "DOLRECOMP_RETURN;") != NULL,
           "computed branch hands the target to the dispatcher");
     check(strstr(code, "mem_read32(ctx, ea)") != NULL,
           "lwzx table load lowers to a memory read");
