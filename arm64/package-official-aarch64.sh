@@ -42,13 +42,58 @@ assert_clean() {
 
 copy_libs() {
   local dest="$1/lib"
+  local pulse
   mkdir -p "$dest"
   cp -a "$BUILT/lib/." "$dest/"
-  # pulse private helper lives in a subdir; ldd-style walker missed it
-  local pulse="$ROOT/sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so"
+  # pulse private helper lives in a subdir; the original runtime walker cannot
+  # discover it from moderngekko-run. Once staged, recursively resolve its own
+  # NEEDED entries (libsndfile, libX11-xcb, libasyncns, etc.) from the sysroot.
+  pulse="$REPO/../sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so"
   if [ -f "$pulse" ] && [ ! -e "$dest/libpulsecommon-16.1.so" ]; then
     cp -L "$pulse" "$dest/libpulsecommon-16.1.so"
   fi
+  python3 - "$dest" "$REPO/../sysroot" <<'PY'
+import os, subprocess, sys
+
+dest, sysroot = sys.argv[1:3]
+dump = 'aarch64-linux-gnu-objdump'
+skip = {'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'ld-linux-aarch64.so.1', 'linux-vdso.so.1'}
+search = [os.path.join(sysroot, p) for p in ('usr/lib/aarch64-linux-gnu', 'lib/aarch64-linux-gnu')]
+
+def needed(path):
+    out = subprocess.check_output([dump, '-p', path], text=True, errors='replace')
+    return [line.split()[-1] for line in out.splitlines() if line.strip().startswith('NEEDED')]
+
+def locate(name):
+    for directory in search:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) or os.path.islink(candidate):
+            return candidate
+    return None
+
+queue = [os.path.join(dest, n) for n in os.listdir(dest)]
+seen = set()
+while queue:
+    current = queue.pop()
+    try:
+        deps = needed(current)
+    except (OSError, subprocess.CalledProcessError):
+        continue
+    for name in deps:
+        if name in skip or name in seen:
+            continue
+        seen.add(name)
+        output = os.path.join(dest, name)
+        if os.path.exists(output):
+            queue.append(output)
+            continue
+        source = locate(name)
+        if not source:
+            print(f'    missing {name}', flush=True)
+            continue
+        subprocess.check_call(['cp', '-L', source, output])
+        queue.append(output)
+PY
 }
 
 # ---------------------------------------------------------------------------
