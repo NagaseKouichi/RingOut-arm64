@@ -211,10 +211,12 @@ PY
 }
 collect_libs "$RUNTIME" "$STAGE/lib"
 # PulseAudio keeps this private helper below pulseaudio/, outside the generic
-# DT_NEEDED lookup directories. Bundle it beside libpulse so LD_LIBRARY_PATH
-# resolves the aarch64 runtime on a minimal target.
+# DT_NEEDED lookup directories. Bundle it beside libpulse, then close the
+# dependency graph a second time: libpulsecommon itself needs libsndfile,
+# libX11-xcb and libasyncns on Debian's aarch64 build.
 if [ "${RINGOUT_IN_CROSS:-0}" = 1 ] && [ -f /work/sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so ]; then
   install -m 755 /work/sysroot/usr/lib/aarch64-linux-gnu/pulseaudio/libpulsecommon-16.1.so "$STAGE/lib/libpulsecommon-16.1.so"
+  collect_libs "$STAGE/lib/libpulsecommon-16.1.so" "$STAGE/lib"
 fi
 echo "    $(ls "$STAGE/lib" | wc -l) libraries"
 
