@@ -1,18 +1,5 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: RingOut aarch64 port <local>
-Subject: [PATCH] linux aarch64: guard x86-only fmod pin, --deck, PGO, glibc fallback
-
-Against jackpoison-prog/RingOut v1.6.3 (ceda43f4).
-
-Four first-party portability guards. This does not modify ModernGekko or the
-vendored Dolphin runtime. Apply from the repo root:
-
-  git apply --check patches/0001-linux-aarch64-port-guards.patch
-  git apply patches/0001-linux-aarch64-port-guards.patch
-
----
-
-index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c3363cee51b4 100644
+diff --git a/DolRecomp/src/cpu/cpu.c b/DolRecomp/src/cpu/cpu.c
+index 0c72c2c3..276f5f11 100644
 --- a/DolRecomp/src/cpu/cpu.c
 +++ b/DolRecomp/src/cpu/cpu.c
 @@ -43,7 +43,9 @@
@@ -27,10 +14,10 @@ index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c336
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/RingOut b/dist/RingOut-1.0-dist/RingOut
-index 979a63b8f3cb199807d0938a337e265cf9c414c9..86f2d530bd69176b4ed419b22b7afbe812a56005 100755
+index b203e4e7..1f4264ca 100755
 --- a/dist/RingOut-1.0-dist/RingOut
 +++ b/dist/RingOut-1.0-dist/RingOut
-@@ -282,7 +282,8 @@ NEED_GLIBC=2.36
+@@ -300,7 +300,8 @@ NEED_GLIBC=2.36
  host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
  LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
  
@@ -41,7 +28,7 @@ index 979a63b8f3cb199807d0938a337e265cf9c414c9..86f2d530bd69176b4ed419b22b7afbe8
      echo "Ring Out: host glibc $host_glibc is older than $NEED_GLIBC - using bundled glibc." >&2
      # $LIB_PATH, not $HERE/lib: on this path the bundled glibc genuinely has to
 diff --git a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
-index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c3363cee51b4 100644
+index 0c72c2c3..276f5f11 100644
 --- a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
 +++ b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
 @@ -43,7 +43,9 @@
@@ -56,7 +43,7 @@ index 54ceebd36cd88989b168cf1e98a5d4a5aadea6ec..d76cab294c38344a66672082f541c336
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
-index bcc3539e52e26aa578c49a38abb44922a1e98a98..d8632123c9cd884ad4dccb760bb61c13f5fabeba 100755
+index b4f33264..629fb926 100755
 --- a/dist/RingOut-1.0-dist/setup.sh
 +++ b/dist/RingOut-1.0-dist/setup.sh
 @@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
@@ -79,7 +66,7 @@ index bcc3539e52e26aa578c49a38abb44922a1e98a98..d8632123c9cd884ad4dccb760bb61c13
  else
      MARCH="native"
  fi
-@@ -479,7 +489,10 @@ echo "==> 3/$NSTAGES  Building the module"
+@@ -501,7 +511,10 @@ echo "==> 3/$NSTAGES  Building the module"
  # regions. So: use the profile for THIS disc, and if there is not one, use none.
  PGO_ARGS=()
  PROFILE=""
