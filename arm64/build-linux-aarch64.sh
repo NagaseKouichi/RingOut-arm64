@@ -15,9 +15,13 @@ CROSS_IMAGE="${CROSS_IMAGE:-ringout-arm64-cross}"
 uname_m="$(uname -m)"
 if [ "${RINGOUT_IN_CROSS:-0}" != 1 ] && [ "$uname_m" != "aarch64" ] && [ "$uname_m" != "arm64" ]; then
   echo "==> host is $uname_m; cross-compiling with $CROSS_IMAGE"
-  export TMPDIR="${TMPDIR:-$ROOT/tmp}"
-  mkdir -p "$TMPDIR" "$ROOT/ccache" "$OUT"
-  test -d "$ROOT/sysroot/usr/include" || { echo "missing sysroot at $ROOT/sysroot" >&2; exit 1; }
+  # The checkout lives under the workspace root, alongside the sysroot and
+  # cross-build output. Mount that root as /work; mounting arm64/ alone leaves
+  # /work/sysroot and /work/cmake absent in the container.
+  WORK_ROOT="$(cd "$REPO/.." && pwd)"
+  export TMPDIR="${TMPDIR:-$WORK_ROOT/tmp}"
+  mkdir -p "$TMPDIR" "$WORK_ROOT/ccache" "$OUT"
+  test -d "$WORK_ROOT/sysroot/usr/include" || { echo "missing sysroot at $WORK_ROOT/sysroot" >&2; exit 1; }
   docker build -t "$CROSS_IMAGE" -f "$ROOT/docker/aarch64-cross.Dockerfile" "$ROOT/docker"
   exec docker run --rm \
     -e TMPDIR=/work/tmp \
@@ -29,11 +33,11 @@ if [ "${RINGOUT_IN_CROSS:-0}" != 1 ] && [ "$uname_m" != "aarch64" ] && [ "$uname
     -e OUT=/work/release \
     -e RINGOUT_IN_CROSS=1 \
     --user "$(id -u):$(id -g)" \
-    -v "$ROOT:/work" \
+    -v "$WORK_ROOT:/work" \
     -v "$REPO:/src" \
     -w /src \
     "$CROSS_IMAGE" \
-    bash /work/build-linux-aarch64.sh
+    bash /src/arm64/build-linux-aarch64.sh
 fi
 
 BUILD="${BUILD:-$ROOT/build-arm64}"
