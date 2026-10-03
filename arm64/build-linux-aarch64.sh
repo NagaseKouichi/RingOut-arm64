@@ -32,6 +32,7 @@ if [ "${RINGOUT_IN_CROSS:-0}" != 1 ] && [ "$uname_m" != "aarch64" ] && [ "$uname
     -e BUILD="/work/build-arm64-cross-$VERSION" \
     -e OUT=/work/release \
     -e RINGOUT_IN_CROSS=1 \
+    -e FORCE_RECONFIGURE="${FORCE_RECONFIGURE:-0}" \
     --user "$(id -u):$(id -g)" \
     -v "$WORK_ROOT:/work" \
     -v "$REPO:/src" \
@@ -83,7 +84,8 @@ else
   cmake -S "$REPO/ModernGekko" -B "$BUILD" -GNinja \
     "${TOOLCHAIN[@]}" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DENABLE_LTO=ON \
+    -DENABLE_LTO=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS= \
     -DENABLE_QT=OFF \
     -DENABLE_TESTS=OFF \
     -DENABLE_ANALYTICS=OFF \

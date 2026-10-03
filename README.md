@@ -96,7 +96,7 @@ Use `./setup.sh --pgo /path/to/your-disc.iso` to train a profile on the target A
 
 The emulated PowerPC CPU workload is principally single-threaded. Dolphin dual-core mode separates CPU and video work, but it does not divide one guest CPU across all host cores. A system-wide low CPU percentage alongside one saturated core is expected for a CPU-bound scene.
 
-Upstream 1.6.6 adds portable generated-C optimizations such as `--fp-check-once` and `--twin-cr`. They apply to ARM64 only after regenerating the disc's chunks and rebuilding the native module. The ARM64 runtime build enables LTO, but the upstream x86 runtime/module PGO profiles cannot be reused; train ARM64 profiles separately on a matching target and compiler.
+Upstream 1.6.6 adds portable generated-C optimizations such as `--fp-check-once` and `--twin-cr`. They apply to ARM64 only after regenerating the disc's chunks and rebuilding the native module. The ARM64 **game module** uses LTO, but runtime LTO is disabled in the Debian cross-build because GCC 13 crashes internally at link time; the upstream x86 runtime/module PGO profiles cannot be reused either. Train ARM64 profiles separately on a matching target and compiler.
 
 ---
 
