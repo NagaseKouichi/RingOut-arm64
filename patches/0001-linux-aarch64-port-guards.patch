@@ -1,5 +1,5 @@
 diff --git a/DolRecomp/src/cpu/cpu.c b/DolRecomp/src/cpu/cpu.c
-index 0c72c2c3..276f5f11 100644
+index bddd77be..695dae77 100644
 --- a/DolRecomp/src/cpu/cpu.c
 +++ b/DolRecomp/src/cpu/cpu.c
 @@ -43,7 +43,9 @@
@@ -14,10 +14,10 @@ index 0c72c2c3..276f5f11 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/RingOut b/dist/RingOut-1.0-dist/RingOut
-index b203e4e7..1f4264ca 100755
+index 0f6c97d9..99bc8372 100755
 --- a/dist/RingOut-1.0-dist/RingOut
 +++ b/dist/RingOut-1.0-dist/RingOut
-@@ -300,7 +300,8 @@ NEED_GLIBC=2.36
+@@ -307,7 +307,8 @@ NEED_GLIBC=2.36
  host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
  LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
  
@@ -28,7 +28,7 @@ index b203e4e7..1f4264ca 100755
      echo "Ring Out: host glibc $host_glibc is older than $NEED_GLIBC - using bundled glibc." >&2
      # $LIB_PATH, not $HERE/lib: on this path the bundled glibc genuinely has to
 diff --git a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
-index 0c72c2c3..276f5f11 100644
+index bddd77be..695dae77 100644
 --- a/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
 +++ b/dist/RingOut-1.0-dist/module-src/deps/dolrecomp-src/cpu/cpu.c
 @@ -43,7 +43,9 @@
@@ -43,7 +43,7 @@ index 0c72c2c3..276f5f11 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
-index b4f33264..629fb926 100755
+index 526afa27..b081aa52 100755
 --- a/dist/RingOut-1.0-dist/setup.sh
 +++ b/dist/RingOut-1.0-dist/setup.sh
 @@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
@@ -66,15 +66,15 @@ index b4f33264..629fb926 100755
  else
      MARCH="native"
  fi
-@@ -501,7 +511,10 @@ echo "==> 3/$NSTAGES  Building the module"
- # regions. So: use the profile for THIS disc, and if there is not one, use none.
+@@ -520,8 +530,10 @@ echo "==> 3/$NSTAGES  Building the module"
+ # clang 22 uses). The check after the build reports any mismatch that is left.
  PGO_ARGS=()
  PROFILE=""
++# Shipped .profdata files were trained for x86_64. ARM64 needs its own
++# compiler- and target-matched training, not either of these x86 profiles.
+ CLANG_MAJOR="$("$CC" -dumpversion 2>/dev/null | cut -d. -f1)"
 -if "$CC" --version 2>&1 | grep -qi clang; then
-+# Shipped .profdata files were trained on x86_64 modules. Feeding them to an
-+# aarch64 clang is a mismatched profile (wrong CFG hashes) and is slower than
-+# none. Train on this machine with --pgo instead.
 +if "$CC" --version 2>&1 | grep -qi clang && { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; }; then
-     if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
-         PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
-     elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
+     if [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata" ]; then
+         PROFILE="$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata"
+     elif [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then

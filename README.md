@@ -6,7 +6,7 @@ This repository is a **Linux aarch64 (ARM64) build fork** of [jackpoison-prog/Ri
 
 It builds and runs Ring Out natively on 64-bit ARM Linux. It is **not** the official x86_64 package running through box64 or another x86 translator.
 
-The fork currently tracks upstream **v1.6.3**. It carries the small ARM64 portability guards and reproducible cross-build / packaging scripts needed to produce native aarch64 packages.
+The fork currently tracks upstream **v1.6.6**. It carries the small ARM64 portability guards and reproducible cross-build / packaging scripts needed to produce native aarch64 packages.
 
 **No game data or game-derived code is included.** Supply an image from a GameCube disc you own. The setup process accepts the formats supported upstream, including `.iso`, `.gcm`, and `.rvz`.
 
@@ -96,7 +96,7 @@ Use `./setup.sh --pgo /path/to/your-disc.iso` to train a profile on the target A
 
 The emulated PowerPC CPU workload is principally single-threaded. Dolphin dual-core mode separates CPU and video work, but it does not divide one guest CPU across all host cores. A system-wide low CPU percentage alongside one saturated core is expected for a CPU-bound scene.
 
-Upstream 1.6.2 and 1.6.3 add portable generated-C module optimizations, so they apply to ARM64 when the disc is regenerated and the module rebuilt. They are not obtained by copying a new runtime over an old module. On ARM64, target-native PGO is generally more valuable than attempting to reuse an x86 profile; LTO can provide a further incremental improvement.
+Upstream 1.6.6 adds portable generated-C optimizations such as `--fp-check-once` and `--twin-cr`. They apply to ARM64 only after regenerating the disc's chunks and rebuilding the native module. The ARM64 runtime build enables LTO, but the upstream x86 runtime/module PGO profiles cannot be reused; train ARM64 profiles separately on a matching target and compiler.
 
 ---
 
