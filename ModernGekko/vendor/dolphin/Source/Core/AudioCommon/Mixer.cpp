@@ -63,6 +63,11 @@ void Mixer::DoState(PointerWrap& p)
 // Executed from sound stream thread
 void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
 {
+  // RingOut: an input that has never received audio contributes exact zeros; skip it
+  // (see m_has_received_audio). Its resampling phase then starts with its first data.
+  if (!m_has_received_audio.load(std::memory_order_acquire))
+    return;
+
   constexpr u32 INDEX_HALF = 0x80000000;
   constexpr DT_s FADE_IN_RC = DT_s(0.008);
   constexpr DT_s FADE_OUT_RC = DT_s(0.064);
@@ -548,6 +553,7 @@ void Mixer::MixerFifo::Enqueue()
   m_queue_head.store(next_head, std::memory_order_release);
   m_queue_fading.store(false, std::memory_order_relaxed);
   m_queue_looping.store(false, std::memory_order_relaxed);
+  m_has_received_audio.store(true, std::memory_order_release);
 }
 
 bool Mixer::MixerFifo::Dequeue(Granule* granule)

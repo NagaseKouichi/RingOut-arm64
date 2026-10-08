@@ -109,6 +109,17 @@ option(MODULE_DC_LOCAL "Keep the downcount charge in a chunk local" ON)
 if(MODULE_DC_LOCAL)
   target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_DC_LOCAL_ENABLE)
 endif()
+# Do not track FPRF (the FP result class in FPSCR bits 12-16) at all, as Dolphin
+# does by default (its FPRF setting is off): lazy FPRF still stored every FP
+# result, ~20% of the original cost. The game reads FPSCR at two mffs sites, so
+# the frame hash changes -- deterministically -- but nothing in it acts on the
+# class bits (Dolphin plays the game this way). Measured on the Steam Deck, US,
+# 16000 frames, same generated tree and profile, n=6 alternating: -0.43% cycles,
+# -0.99% instructions, ranges not overlapping (2026-10-05).
+option(MODULE_NO_FPRF "Do not track the FP result class (Dolphin's default)" ON)
+if(MODULE_NO_FPRF)
+  target_compile_definitions(${MODULE_NAME} PRIVATE RECOMP_NO_FPRF)
+endif()
 if(MODULE_RAM_LOCAL)
   target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_RAM_LOCAL_ENABLE)
 endif()
@@ -487,7 +498,13 @@ if(NOT WIN32)
   set(MODULE_INTERPOSITION_FLAG -fno-semantic-interposition)
 endif()
 
+# -fno-stack-protector: Arch-family and other distro clangs turn the stack
+# protector on by default, which put a canary store and check on 627 chunk
+# entries/exits of the module. Generated chunks have no buffers a guest can
+# overrun (guest memory is a separate array), so the canary guards nothing.
+# Steam Deck, US, 16000 frames, n=6 alternating: -0.39% cycles, -0.50%
+# instructions, ranges not overlapping, frame hash identical (2026-10-05).
 target_compile_options(${MODULE_NAME} PRIVATE
   ${MODULE_LTO_FLAG} -fvisibility=hidden ${MODULE_INTERPOSITION_FLAG}
-  -ffp-contract=off ${MODULE_PATH_MAP})
+  -ffp-contract=off -fno-stack-protector ${MODULE_PATH_MAP})
 target_link_options(${MODULE_NAME} PRIVATE ${MODULE_LTO_FLAG})

@@ -8,6 +8,8 @@
 #include "frontend/container/rel.h"
 #include "frontend/container/rpx.h"
 #include "backend/emitter.h"
+#include "backend/native_skin.h"
+#include "backend/native_regions.h"
 #ifdef DOLRECOMP_ENABLE_LLVM
 #include "ir/dolir_builder.h"
 #include "backend/llvm/llvm_backend.h"
@@ -1191,6 +1193,10 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         printf("  symbols: %s\n", symbol_header_path);
     printf("  chunks: %s (%u files)\n", chunks_dir, file_count);
     emit_report_ca_stats();
+    if (!native_skin_apply(sections, section_count, chunks_dir))
+        return 0;
+    if (!native_regions_apply(chunks_dir))
+        return 0;
     return 1;
 }
 

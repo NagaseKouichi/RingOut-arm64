@@ -236,6 +236,13 @@ if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--chunk-ov
 if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--ram-bases', '1,2,13') }
 # One MSR.FP test per straight-line run of FP instructions, as in setup.sh. All four discs.
 if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--fp-check-once') }
+# --native-skin (all four discs): the CPU skinning loops run as native C (see setup.sh for the numbers);
+# frame hashes are identical on all four discs.
+if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--native-skin') }
+# --native-regions, as in setup.sh: the disc's hottest loops and functions run as native C. The list ships
+# beside the profile; a disc without one builds as before.
+$RegionList = Join-Path $Here "module-src\profiles\$DiscId.regions"
+if (Test-Path $RegionList) { $LeaderCases += @('--native-regions', $RegionList) }
 # Twin chunks, as in setup.sh: a fast copy of each chunk entered only at the
 # entry PCs a training run used (the list ships beside the profile), the
 # ordinary chunk as a cold fallback. A disc without a list builds as before.
@@ -383,6 +390,54 @@ if (Test-Path -LiteralPath $shaderSrc) {
     Get-ChildItem $shaderSrc -Filter *.glsl | ForEach-Object {
         $target = Join-Path $shaderDst $_.Name
         if (-not (Test-Path -LiteralPath $target)) { Copy-Item $_.FullName $target }
+    }
+}
+
+# SHADER WARM-UP, as setup.sh does on Linux. The first launch compiles Dolphin's
+# ubershaders before the game starts (the runtime forces WaitForShadersBeforeStarting
+# on), and with an empty cache that is a black window for ~5 minutes on the 2-core
+# test laptop (measured 2026-10-02, Vulkan: process start to cache written). Booting
+# the game for 10 frames here builds that cache -- Dolphin's in userdata\Cache and the
+# driver's own -- so the wait happens during setup, where waiting is expected.
+# On a desktop it takes a few seconds. RINGOUT_NO_SHADER_WARMUP skips it.
+#
+# The game is started directly, not through RingOut.exe: the launcher only adds
+# --user-dir and --game, and has no single-instance lock to collide with.
+# RINGOUT_DETERMINISM_LOG arms the frame limit; without it the game keeps running.
+if (-not $env:RINGOUT_NO_SHADER_WARMUP) {
+    Write-Host "==> shaders"
+    $uberCache = Get-ChildItem (Join-Path $Here 'userdata\Cache\Shaders') -Filter '*-uber-ps-*.cache' -ErrorAction SilentlyContinue
+    if ($uberCache) {
+        Write-Host "    already built - skipped."
+    } else {
+        Write-Host "    starting the game once to build its shader cache (a few seconds on a"
+        Write-Host "    desktop, ~5 minutes on a slow laptop). A window opens and closes."
+        $warmLog = Join-Path $Here 'work\shader-warmup-frames.log'
+        New-Item -ItemType Directory -Force -Path (Split-Path $warmLog) | Out-Null
+        Remove-Item -LiteralPath $warmLog -ErrorAction SilentlyContinue
+        $env:RINGOUT_DETERMINISM_LOG = $warmLog
+        $env:RINGOUT_DETERMINISM_NOHASH = '1'
+        $env:RINGOUT_DETERMINISM_FRAMES = '10'
+        $warmStart = Get-Date
+        try {
+            $exe = Join-Path $Here 'bin\moderngekko-run.exe'
+            $warmArgs = @('--user-dir', "`"$(Join-Path $Here 'userdata')`"", '--game', "`"$(Join-Path $Here 'game')`"",
+                          '--module', "`"$(Join-Path $Here "bin\g${DiscId}_recomp.dll")`"")
+            $wp = Start-Process -FilePath $exe -ArgumentList $warmArgs -PassThru -WindowStyle Normal `
+                    -RedirectStandardOutput (Join-Path $Here 'userdata\shader-warmup.log') `
+                    -RedirectStandardError (Join-Path $Here 'userdata\shader-warmup.err.log')
+            if (-not $wp.WaitForExit(900000)) { $wp.Kill() }
+        } catch {
+            Write-Host "    could not start the game: $($_.Exception.Message)"
+        } finally {
+            Remove-Item Env:RINGOUT_DETERMINISM_LOG, Env:RINGOUT_DETERMINISM_NOHASH, Env:RINGOUT_DETERMINISM_FRAMES -ErrorAction SilentlyContinue
+        }
+        if (Get-ChildItem (Join-Path $Here 'userdata\Cache\Shaders') -Filter '*-uber-ps-*.cache' -ErrorAction SilentlyContinue) {
+            Write-Host "    done in $([int]((Get-Date) - $warmStart).TotalSeconds) s."
+        } else {
+            Write-Host "    did not finish - not a problem, the first launch will build them."
+            Write-Host "    (details, if any: userdata\shader-warmup.err.log)"
+        }
     }
 }
 

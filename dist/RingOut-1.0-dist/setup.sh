@@ -455,6 +455,29 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--ram-bases 1,2,1
 # still tests. Steam Deck, cycles, both arms retrained, game behaviour unchanged:
 # US -2.61%, JP -2.24%, Plus -0.99%, PAL -2.23%.
 case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--fp-check-once);; esac
+# --native-skin (all four discs): the game skins character meshes on the CPU in
+# one function (US/Plus 0x801269D4, JP 0x8012396C, PAL 0x8012B494; the recompiler
+# finds it by its instruction signature). Its one-, two- and three-bone vertex
+# loops run as native C with the per-instruction bookkeeping hoisted out, every
+# access guarded so it is exactly what the recompiled code would do. Steam Deck,
+# US, both arms retrained: -1.91% cycles, -5.18% instructions; frame hashes are
+# identical on all four discs.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--native-skin);; esac
+# --native-regions (each disc with a list): the hottest loops and whole functions
+# of a fight run as native C -- guest registers in locals, one guarded test per
+# RAM access, and small leaf functions they call inlined, so those calls stop
+# going through the dispatcher. Anything the recompiler cannot do exactly is left
+# as emitted. Steam Deck, both arms retrained, cycles: US -2.88%, JP -3.24%,
+# PAL -2.90%, Plus -2.24%; then the second RNG loop and a widened region on top:
+# US -1.64%, JP -0.68%, PAL -1.85%, Plus -1.46%; then every copy of a region (chunk overhang
+# copies too), downcount exits that resume inside it, and fewer refusals (FPSCR-only helpers,
+# conditional returns, mfcr, callees that call, cold-call exits): US -1.38%, JP -1.41%,
+# PAL -3.52%, Plus -2.85%. Frame hashes identical. The list ships beside the
+# profile: chosen from a US fight, and carried to the other discs by instruction
+# signature.
+if [ -f "$HERE/module-src/profiles/$DISC_ID.regions" ]; then
+    LEADER_CASES+=(--native-regions "$HERE/module-src/profiles/$DISC_ID.regions")
+fi
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every

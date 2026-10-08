@@ -108,6 +108,7 @@ enum class Item
   // System
   Speed,
   Overclock,
+  FastDisc,
   StateSlot,
   SaveState,
   LoadState,
@@ -198,7 +199,7 @@ const std::vector<Item>& TabItems(Tab tab)
                                           Item::FillGaps, Item::Apply};
   static const std::vector<Item> states = {Item::StateSlot, Item::SaveState, Item::LoadState,
                                           Item::AutoResume};
-  static const std::vector<Item> system = {Item::Speed,        Item::Overclock,
+  static const std::vector<Item> system = {Item::Speed,        Item::Overclock,     Item::FastDisc,
                                            Item::NetplayMode,
                                            Item::NetplayScan,
                                            Item::NetplayAddress,
@@ -1024,6 +1025,8 @@ const char* ItemLabel(Item item)
     return "Auto-Resume";
   case Item::Overclock:
     return "CPU Overclock";
+  case Item::FastDisc:
+    return "Fast Disc Loading";
   case Item::NetplayMode:
     return "Netplay";
   case Item::NetplayScan:
@@ -1465,10 +1468,16 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return Config::Get(Config::MAIN_AUDIO_FILL_GAPS) ? "ON" : "OFF";
   case Item::Speed:
   {
-    const float speed = Config::Get(Config::MAIN_EMULATION_SPEED);
-    if (speed <= 0.0f)
-      return "Unlimited";
-    return std::to_string(static_cast<int>(speed * 100.0f + 0.5f)) + "%";
+    // The CONFIGURED speed (base layer), which is what this row changes. Showing
+    // the effective value instead made a stuck hold-Tab override (CurrentRun = 0)
+    // read "Unlimited" whatever was picked -- the row looked broken (2026-10-03).
+    const float speed = Config::GetBase(Config::MAIN_EMULATION_SPEED);
+    std::string text = speed <= 0.0f ?
+                           std::string("Unlimited") :
+                           std::to_string(static_cast<int>(speed * 100.0f + 0.5f)) + "%";
+    if (Config::Get(Config::MAIN_EMULATION_SPEED) != speed)
+      text += "  (Tab)";
+    return text;
   }
   case Item::StateSlot:
     return std::to_string(state_slot) + "  (" + StateSlotWhen(state_slot) + ")";
@@ -1478,6 +1487,8 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return StateSlotUsed(state_slot) ? "LOAD" : "-";
   case Item::AutoResume:
     return Config::Get(RECOMP_AUTO_RESUME) ? "ON" : "OFF";
+  case Item::FastDisc:
+    return Config::Get(Config::MAIN_FAST_DISC_SPEED) ? "ON" : "OFF";
   default:
     return "";
   }
@@ -1910,7 +1921,10 @@ bool AdjustItem(Item item, int direction, State& state)
     // 0 (unlimited) sits above 200% so the wrap order reads naturally.
     static constexpr std::array<float, 8> kSpeeds = {0.25f, 0.5f,  0.75f, 1.0f,
                                                      1.25f, 1.5f,  2.0f,  0.0f};
-    const float current = Config::Get(Config::MAIN_EMULATION_SPEED);
+    // Step from the configured value, not the effective one: with fast-forward
+    // held (or stuck) the effective value is 0, and stepping from it wrote
+    // "Unlimited" into the player's Dolphin.ini.
+    const float current = Config::GetBase(Config::MAIN_EMULATION_SPEED);
     int index = 3;
     for (size_t i = 0; i < kSpeeds.size(); ++i)
     {
@@ -1924,6 +1938,10 @@ bool AdjustItem(Item item, int direction, State& state)
     Config::SetBase(Config::MAIN_EMULATION_SPEED, kSpeeds[index]);
     break;
   }
+  case Item::FastDisc:
+    // Read per disc command, so it takes effect at the next load.
+    Config::SetBase(Config::MAIN_FAST_DISC_SPEED, !Config::Get(Config::MAIN_FAST_DISC_SPEED));
+    break;
   case Item::AutoResume:
     // On quit, save a state; on next launch, load it. Save/load themselves
     // happen outside the mutex (Quit action / ScheduleAutoResumeLoad).

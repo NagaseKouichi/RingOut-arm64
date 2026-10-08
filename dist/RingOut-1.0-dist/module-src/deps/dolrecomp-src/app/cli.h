@@ -38,6 +38,8 @@ typedef struct {
     int self_calls;     // --self-calls (needs --direct-calls)
     int tail_calls;     // --tail-calls (needs --direct-calls)
     int exit_stats;     // --exit-stats (diagnostic: count dispatches by cause)
+    int native_skin;    // --native-skin: native fast paths for SC2's CPU skinning loops
+    const char* native_regions; // --native-regions <file>: hot guest regions run as native C
     int ca_liveness;
     int ca_elide;       // --ca-elide (changes codegen; off by default)
     int cpu_explicit;

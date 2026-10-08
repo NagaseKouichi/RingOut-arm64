@@ -102,6 +102,8 @@ add_library(dr_backend STATIC
     src/backend/dispatch.c
     src/backend/codegen.c
     src/backend/twin.c
+    src/backend/native_skin.c
+    src/backend/native_regions.c
     src/backend/symbols.c
 )
 target_include_directories(dr_backend PUBLIC ${DOLRECOMP_SRC})
@@ -226,6 +228,14 @@ add_test(NAME lazy_fprf COMMAND test_lazy_fprf)
 add_executable(test_idle_pc tests/test_idle_pc.c)
 target_link_libraries(test_idle_pc PRIVATE dr_backend)
 add_test(NAME idle_pc COMMAND test_idle_pc)
+
+# --native-regions on real chunk files generated from synthetic code: which copies
+# get a region (overhang copies too), how downcount exits re-enter it, and what a
+# region may contain. The 16000-frame hash is the end-to-end check; this pins the
+# text the pass writes.
+add_executable(test_native_regions tests/test_native_regions.c)
+target_link_libraries(test_native_regions PRIVATE dr_backend dr_platform)
+add_test(NAME native_regions COMMAND test_native_regions)
 
 # ...and this pins the scan that supplies the address to it, which is what
 # --idle-pc auto rests on for a disc nobody has hand-inspected.

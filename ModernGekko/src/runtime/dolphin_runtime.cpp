@@ -51,10 +51,18 @@
 #include <mutex>
 #include <ranges>
 #include <thread>
+#include <functional>
+#include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
+#ifndef _WIN32
+#include <unistd.h>   // fps watch: sysconf(_SC_CLK_TCK)
+#endif
 #ifdef _WIN32
 #include <windows.h>  // LoadLibraryW: probing vulkan-1.dll before honouring a Vulkan pick
+#include <tlhelp32.h> // fps watch: per-thread CPU times
 // Types only (VK_NO_PROTOTYPES): the probe below resolves everything through
 // vkGetInstanceProcAddr, so nothing links against the loader.
 #define VK_NO_PROTOTYPES
@@ -476,6 +484,12 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
   Config::SetBase(Config::MAIN_CPU_THREAD,
                   !RecompDeterminism::IsActive() || determinism_dual_core);
 
+  // Fast disc loading changes WHEN loads finish, and so every frame after the first one. The scripted
+  // routes and their known hashes were all recorded at real disc speed; keep the harness there unless a
+  // run asks for the player's default (RINGOUT_DETERMINISM_FASTDISC=1).
+  if (RecompDeterminism::IsActive() && std::getenv("RINGOUT_DETERMINISM_FASTDISC") == nullptr)
+    Config::SetBase(Config::MAIN_FAST_DISC_SPEED, false);
+
   // Pinned, not derived from the host. Dolphin used to set this from the CPU's
   // core count in Core::EmuThread, which meant the same game ran different DSP
   // emulation on different machines -- and netplay never synced it (the server
@@ -702,13 +716,205 @@ std::unique_ptr<BootParameters> TakeBootParameters(const std::string &main_dol) 
   return boot;
 }
 
+// --- fps watch ---------------------------------------------------------------
+// One launch.log line for each second the game runs below full speed, saying
+// what the machine was doing: speed, fps, process CPU and the busiest threads.
+// A player's "it's slow" report then names the cause (the game thread pinned
+// at 100%, the GPU thread, the audio thread...) instead of starting a guessing
+// game. Plus one line at start naming the CPU and GPU. RINGOUT_FPS_WATCH=0 turns
+// it off; RINGOUT_FPS_WATCH=<percent> moves the threshold. The idea is from Wind Waker Recomp's fps_watch (2026-10-03).
+struct ThreadSample {
+  unsigned long long id;
+  std::string name;
+  unsigned long long t100ns; // user + kernel time, in 100 ns units
+};
+
+#ifdef _WIN32
+std::vector<ThreadSample> SampleThreads() {
+  std::vector<ThreadSample> out;
+  using GetThreadDescriptionFn = HRESULT(WINAPI *)(HANDLE, PWSTR *);
+  static const auto get_description = reinterpret_cast<GetThreadDescriptionFn>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE)
+    return out;
+  THREADENTRY32 te{};
+  te.dwSize = sizeof(te);
+  const DWORD pid = GetCurrentProcessId();
+  for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+    if (te.th32OwnerProcessID != pid)
+      continue;
+    const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+    if (!h)
+      continue;
+    FILETIME created, exited, kernel, user;
+    if (GetThreadTimes(h, &created, &exited, &kernel, &user)) {
+      ThreadSample s{te.th32ThreadID, {}, 0};
+      s.t100ns = ((static_cast<unsigned long long>(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) +
+                 ((static_cast<unsigned long long>(user.dwHighDateTime) << 32) | user.dwLowDateTime);
+      PWSTR wide = nullptr;
+      if (get_description && SUCCEEDED(get_description(h, &wide)) && wide && *wide) {
+        char name[128] = {};
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, sizeof(name) - 1, nullptr, nullptr);
+        s.name = name;
+      }
+      if (wide)
+        LocalFree(wide);
+      if (s.name.empty())
+        s.name = fmt::format("tid {}", te.th32ThreadID);
+      out.push_back(std::move(s));
+    }
+    CloseHandle(h);
+  }
+  CloseHandle(snap);
+  return out;
+}
+
+std::string CpuModelName() {
+  char buf[256] = {};
+  DWORD size = sizeof(buf);
+  if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                   "ProcessorNameString", RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS)
+    return buf;
+  return "unknown CPU";
+}
+#else
+std::vector<ThreadSample> SampleThreads() {
+  std::vector<ThreadSample> out;
+  static const long clk = sysconf(_SC_CLK_TCK);
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+    ThreadSample s{0, {}, 0};
+    s.id = std::strtoull(entry.path().filename().c_str(), nullptr, 10);
+    std::ifstream comm(entry.path() / "comm");
+    std::getline(comm, s.name);
+    std::ifstream stat_file(entry.path() / "stat");
+    std::string stat((std::istreambuf_iterator<char>(stat_file)), std::istreambuf_iterator<char>());
+    // The name sits in parentheses and may contain spaces ("Audio thread - "),
+    // so count fields after the LAST ')': utime and stime are the 12th and 13th.
+    const auto close = stat.rfind(')');
+    if (close == std::string::npos || clk <= 0)
+      continue;
+    std::istringstream fields(stat.substr(close + 2));
+    std::string field;
+    unsigned long long utime = 0, stime = 0;
+    for (int i = 1; i <= 13 && fields >> field; ++i) {
+      if (i == 12)
+        utime = std::strtoull(field.c_str(), nullptr, 10);
+      if (i == 13)
+        stime = std::strtoull(field.c_str(), nullptr, 10);
+    }
+    s.t100ns = (utime + stime) * 10000000ull / static_cast<unsigned long long>(clk);
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+std::string CpuModelName() {
+  std::ifstream cpuinfo("/proc/cpuinfo");
+  for (std::string line; std::getline(cpuinfo, line);) {
+    if (line.rfind("model name", 0) == 0) {
+      const auto colon = line.find(':');
+      if (colon != std::string::npos)
+        return line.substr(line.find_first_not_of(' ', colon + 1));
+    }
+  }
+  return "unknown CPU";
+}
+#endif
+
+class FpsWatch {
+public:
+  void Tick() {
+    // RINGOUT_FPS_WATCH: unset = on at 95%; 0 = off; a number = the threshold in
+    // percent of full speed (101 logs every second, for a whole-session trace).
+    static const double threshold = [] {
+      const char *v = std::getenv("RINGOUT_FPS_WATCH");
+      if (!v || !*v)
+        return 0.95;
+      const double pct = std::strtod(v, nullptr);
+      return pct > 0.0 ? pct / 100.0 : 0.0;
+    }();
+    if (threshold <= 0.0)
+      return;
+    auto &system = Core::System::GetInstance();
+    if (!m_header && g_video_backend && Core::GetState(system) == Core::State::Running) {
+      std::string gpu = g_backend_info.AdapterName;
+      if (g_Config.iAdapter >= 0 && static_cast<size_t>(g_Config.iAdapter) < g_backend_info.Adapters.size())
+        gpu = g_backend_info.Adapters[g_Config.iAdapter];
+      std::fprintf(stderr, "[fps-watch] cpu: %s (%u threads) | gpu: %s | renderer: %s\n",
+                   CpuModelName().c_str(), std::thread::hardware_concurrency(),
+                   gpu.empty() ? "unknown" : gpu.c_str(), g_video_backend->GetDisplayName().c_str());
+      m_header = true;
+    }
+    if (Core::GetState(system) != Core::State::Running) {
+      m_prev.clear(); // paused: the next running second starts a fresh sample
+      m_run = 0;
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<ThreadSample> threads = SampleThreads();
+    std::unordered_map<unsigned long long, unsigned long long> cur;
+    for (const auto &t : threads)
+      cur[t.id] = t.t100ns;
+    const bool have_prev = !m_prev.empty();
+    const double wall = std::chrono::duration<double>(now - m_prev_time).count();
+    std::unordered_map<unsigned long long, unsigned long long> prev = std::move(m_prev);
+    m_prev = std::move(cur);
+    m_prev_time = now;
+    if (!have_prev || wall <= 0.2 || ++m_seconds < 3) // boot noise; perf metrics still settling
+      return;
+
+    const double speed = system.GetPerfMetrics().GetSpeed();
+    if (!(speed < threshold)) {
+      m_run = 0;
+      return;
+    }
+    ++m_run;
+    if (m_run > 10 && m_run % 10 != 0)
+      return; // a long slow stretch: every 10th second, not every second
+
+    std::vector<std::pair<double, std::string>> busy;
+    double total = 0.0;
+    for (const auto &t : threads) {
+      const auto it = prev.find(t.id);
+      if (it == prev.end() || t.t100ns < it->second)
+        continue;
+      const double pct = (t.t100ns - it->second) / 1e5 / wall; // 100 ns -> % of one core
+      total += pct;
+      busy.emplace_back(pct, t.name);
+    }
+    std::ranges::sort(busy, std::greater<>{});
+    std::string top;
+    for (size_t i = 0; i < busy.size() && i < 4; ++i) {
+      if (busy[i].first < 1.0)
+        break;
+      top += fmt::format("{}{} {:.0f}%", top.empty() ? "" : ", ", busy[i].second, busy[i].first);
+    }
+    const auto &perf = system.GetPerfMetrics();
+    std::fprintf(stderr, "[fps-dip] speed=%.0f%% fps=%.1f vps=%.1f process_cpu=%.0f%% | %s%s\n",
+                 speed * 100.0, perf.GetFPS(), perf.GetVPS(), total, top.c_str(),
+                 m_run == 10 ? " (still slow: logging every 10th second from now)" : "");
+  }
+
+private:
+  std::unordered_map<unsigned long long, unsigned long long> m_prev;
+  std::chrono::steady_clock::time_point m_prev_time{};
+  bool m_header = false;
+  int m_run = 0;
+  int m_seconds = 0;
+};
+
 // Dolphin only refreshes the window title from its own Host_UpdateTitle calls,
 // which stop while the core is paused, so drive it from here at ~1 Hz. The
 // inner loop sleeps in 100 ms slices so a stop request is honoured promptly.
+// The same tick drives the fps watch above.
 std::jthread StartTitleThread() {
   return std::jthread([](std::stop_token stop_token) {
+    FpsWatch fps_watch;
     while (!stop_token.stop_requested()) {
       Host_UpdateTitle({});
+      fps_watch.Tick();
       for (int i = 0; i < 10 && !stop_token.stop_requested(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

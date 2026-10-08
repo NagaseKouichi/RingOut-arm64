@@ -11,6 +11,8 @@
 #include "frontend/container/rpx.h"
 #include "frontend/container/disc_extract.h"
 #include "backend/emitter.h"
+#include "backend/native_skin.h"
+#include "backend/native_regions.h"
 #include "analysis/idle_loop.h"
 #include "analysis/symbol_map.h"
 #include <stdio.h>
@@ -38,6 +40,12 @@ int main(int argc, char** argv) {
     emit_set_chunk_overhang(opts.chunk_overhang);
     emit_set_preserve_none(opts.preserve_none != 0);
     emit_set_fp_check_once(opts.fp_check_once != 0);
+    native_skin_enable(opts.native_skin != 0);
+    if (opts.native_regions) {
+        if (!native_regions_load(opts.native_regions))
+            return 1;
+        fprintf(stderr, "native regions: %u from %s\n", native_regions_count(), opts.native_regions);
+    }
     if (opts.ram_bases) {
         u32 mask = 0;
         const char* p = opts.ram_bases;

@@ -20,6 +20,8 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --leader-cases                 Reduced entry switch: leaders + FP-guard sites + program-wide\n");
     fprintf(stderr, "                                 branch/data targets (hash-clean, -8%% cycles; DOL input)\n");
     fprintf(stderr, "  --chunk-overhang <max>         Let each chunk run on past its window, up to <max>\n");
+    fprintf(stderr, "  --native-skin                  Native fast paths for SoulCalibur II's CPU skinning loops\n");
+    fprintf(stderr, "  --native-regions <file>        Run the hot guest regions listed in <file> as native C\n");
     fprintf(stderr, "                                 instructions, to the first unconditional exit, so\n");
     fprintf(stderr, "                                 code straddling a boundary stays in one chunk\n");
     fprintf(stderr, "  --ram-bases <list>             D-form loads/stores based on these registers (e.g.\n");
@@ -204,6 +206,18 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--native-skin") == 0) {
+            opts->native_skin = 1;
+            continue;
+        }
+        if (strcmp(arg, "--native-regions") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            opts->native_regions = argv[++i];
+            continue;
+        }
         if (strcmp(arg, "--chunk-overhang") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: %s needs an argument\n", arg);

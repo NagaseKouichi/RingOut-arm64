@@ -151,6 +151,12 @@ private:
     std::atomic<std::size_t> m_queue_tail{0};
     std::atomic<bool> m_queue_fading{false};
     std::atomic<bool> m_queue_looping{false};
+    // RingOut: set by the first Enqueue. Until then the granules hold only zeros, so
+    // Mix() would add exactly nothing (and its quantization error stays 0) -- yet it
+    // still ran the 6-point resampler at the output rate. Mixer::Mix calls every input
+    // (DMA, streaming, 4 Wii remote speakers, the Skylander portal, 4 GBAs), and a
+    // GameCube game only ever feeds one or two of them.
+    std::atomic<bool> m_has_received_audio{false};
     float m_fade_volume = 1.0;
 
     void Enqueue();

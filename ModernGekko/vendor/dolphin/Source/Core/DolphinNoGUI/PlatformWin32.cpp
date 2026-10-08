@@ -322,6 +322,14 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
   }
   break;
 
+  // Losing focus mid-hold means the Tab release goes to another window and never
+  // arrives here, which left fast-forward stuck on: the Speed row then read
+  // "Unlimited" whatever was picked (2026-10-03, the Windows laptop). X11 and
+  // Wayland already release it on focus loss.
+  case WM_KILLFOCUS:
+    RecompMenu::SetFastForward(false);
+    break;
+
   // WM_SYSKEYUP as well: a key released while Alt is held arrives as the SYS
   // variant, so a plain WM_KEYUP would miss it and leave fast-forward stuck on.
   case WM_SYSKEYUP:
