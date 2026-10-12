@@ -43,7 +43,7 @@ index bddd77be..695dae77 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
-index 526afa27..b081aa52 100755
+index 06fe51d9..6873bbba 100755
 --- a/dist/RingOut-1.0-dist/setup.sh
 +++ b/dist/RingOut-1.0-dist/setup.sh
 @@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
@@ -66,7 +66,7 @@ index 526afa27..b081aa52 100755
  else
      MARCH="native"
  fi
-@@ -520,8 +530,10 @@ echo "==> 3/$NSTAGES  Building the module"
+@@ -543,8 +553,10 @@ echo "==> 3/$NSTAGES  Building the module"
  # clang 22 uses). The check after the build reports any mismatch that is left.
  PGO_ARGS=()
  PROFILE=""
