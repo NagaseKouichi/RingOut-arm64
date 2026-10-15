@@ -6,7 +6,7 @@ This repository is a **Linux aarch64 (ARM64) build fork** of [jackpoison-prog/Ri
 
 It builds and runs Ring Out natively on 64-bit ARM Linux. It is **not** the official x86_64 package running through box64 or another x86 translator.
 
-The fork currently tracks upstream **v1.6.7**. It carries the small ARM64 portability guards and reproducible cross-build / packaging scripts needed to produce native aarch64 packages.
+The fork currently tracks upstream **v1.6.8**. It carries the small ARM64 portability guards and reproducible cross-build / packaging scripts needed to produce native aarch64 packages.
 
 **No game data or game-derived code is included.** Supply an image from a GameCube disc you own. The setup process accepts the formats supported upstream, including `.iso`, `.gcm`, and `.rvz`.
 

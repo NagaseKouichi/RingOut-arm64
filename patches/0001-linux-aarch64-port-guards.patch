@@ -14,10 +14,10 @@ index bddd77be..695dae77 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/RingOut b/dist/RingOut-1.0-dist/RingOut
-index 0f6c97d9..99bc8372 100755
+index ca46ccde..9249826a 100755
 --- a/dist/RingOut-1.0-dist/RingOut
 +++ b/dist/RingOut-1.0-dist/RingOut
-@@ -307,7 +307,8 @@ NEED_GLIBC=2.36
+@@ -310,7 +310,8 @@ NEED_GLIBC=2.36
  host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
  LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
  
@@ -43,7 +43,7 @@ index bddd77be..695dae77 100644
  #endif
  
 diff --git a/dist/RingOut-1.0-dist/setup.sh b/dist/RingOut-1.0-dist/setup.sh
-index 06fe51d9..6873bbba 100755
+index 0e232907..50743e9f 100755
 --- a/dist/RingOut-1.0-dist/setup.sh
 +++ b/dist/RingOut-1.0-dist/setup.sh
 @@ -64,8 +64,18 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
@@ -66,7 +66,7 @@ index 06fe51d9..6873bbba 100755
  else
      MARCH="native"
  fi
-@@ -543,8 +553,10 @@ echo "==> 3/$NSTAGES  Building the module"
+@@ -569,8 +579,10 @@ echo "==> 3/$NSTAGES  Building the module"
  # clang 22 uses). The check after the build reports any mismatch that is left.
  PGO_ARGS=()
  PROFILE=""
