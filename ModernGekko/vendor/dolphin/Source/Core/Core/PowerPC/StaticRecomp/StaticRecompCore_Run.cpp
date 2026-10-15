@@ -620,7 +620,14 @@ void StaticRecompCore::Run()
     {
       s_pinned = true;
       const char* e = std::getenv("STATICRECOMP_CPU_AFFINITY");
-      const int core = e ? std::atoi(e) : 2;
+      // ARM64 handhelds have heterogeneous cores: CPU2 can be an efficiency
+      // core. Let the scheduler choose unless the user explicitly overrides it.
+#if defined(__aarch64__)
+      constexpr int default_core = -1;
+#else
+      constexpr int default_core = 2;
+#endif
+      const int core = e ? std::atoi(e) : default_core;
       if (core >= 0)
       {
         cpu_set_t set;
