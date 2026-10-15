@@ -38,9 +38,16 @@ int main(int argc, char** argv) {
     emit_set_chain_calls(opts.chain_calls != 0);
     emit_set_leader_cases(opts.leader_cases != 0);
     emit_set_chunk_overhang(opts.chunk_overhang);
+    emit_set_function_overhang(opts.function_overhang);
+    emit_set_loop_budget(opts.loop_budget);
+    emit_set_dynamic_loop_budget(opts.dynamic_loop_budget != 0);
+    emit_set_jump_tables(opts.jump_tables != 0);
     emit_set_preserve_none(opts.preserve_none != 0);
     emit_set_fp_check_once(opts.fp_check_once != 0);
     native_skin_enable(opts.native_skin != 0);
+    native_skin_set_simd(opts.skin_simd != 0);
+    native_leaves_set(opts.inline_leaves);
+    native_regions_set_psq_direct(opts.region_psq != 0);
     if (opts.native_regions) {
         if (!native_regions_load(opts.native_regions))
             return 1;
@@ -71,6 +78,11 @@ int main(int argc, char** argv) {
     }
     emit_set_direct_calls(opts.direct_calls != 0);
     emit_set_self_calls(opts.self_calls != 0);
+    if (opts.indirect_calls && !opts.direct_calls) {
+        fprintf(stderr, "error: --indirect-calls needs --direct-calls\n");
+        return 1;
+    }
+    emit_set_indirect_calls(opts.indirect_calls != 0);
     emit_set_tail_calls(opts.tail_calls != 0);
     emit_set_exit_stats(opts.exit_stats != 0);    emit_set_ca_liveness(opts.ca_liveness != 0);
     emit_set_ca_elide(opts.ca_elide != 0);

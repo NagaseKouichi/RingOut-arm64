@@ -88,3 +88,13 @@ RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
 #define DOLRECOMP_TIMING_ID 1u
 #endif
 RECOMP_MODULE_EXPORT const u32 staticrecomp_timing_id = DOLRECOMP_TIMING_ID;
+
+/* The loop budget, exported only by a module generated with --dynamic-loop-budget
+   (0 otherwise). Non-zero tells the chassis it may start each dispatch's cycle
+   charge so a loop's `downcount <= -budget` exit fires at max(budget, cycles to
+   the next CoreTiming event). The value must equal the budget the chunks were
+   generated with: a smaller one would let a loop overshoot an event. */
+#ifndef DOLRECOMP_DYN_LOOP_BUDGET
+#define DOLRECOMP_DYN_LOOP_BUDGET 0u
+#endif
+RECOMP_MODULE_EXPORT const u32 staticrecomp_dyn_loop_budget = DOLRECOMP_DYN_LOOP_BUDGET;

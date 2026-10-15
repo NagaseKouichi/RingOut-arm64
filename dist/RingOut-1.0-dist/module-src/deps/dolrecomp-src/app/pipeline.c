@@ -37,6 +37,11 @@
 #include <unistd.h>
 #endif
 
+static int cmp_u32_asc(const void* a, const void* b) {
+    u32 x = *(const u32*)a, y = *(const u32*)b;
+    return x < y ? -1 : x > y;
+}
+
 // --- LLVM object backend -------------------------------------------------
 // Grafted from upstream DolRecomp. Self-contained and #ifdef-gated, so the C
 // backend below -- which carries this fork's own work (native loops, --idle-pc,
@@ -1000,6 +1005,22 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             }
         }
 
+        {   /* --function-overhang: function starts = this section's bl targets, sorted and unique */
+            u32* fs = (u32*)malloc((size_t)(num_insts ? num_insts : 1u) * sizeof(u32));
+            u32 nfs = 0, u = 0;
+            if (fs) {
+                for (u32 i = 0; i < num_insts; i++)
+                    if (insts[i].op == PPC_OP_B && insts[i].lk && !insts[i].embedded_data)
+                        fs[nfs++] = insts[i].branch_target;
+                qsort(fs, nfs, sizeof(u32), cmp_u32_asc);
+                for (u32 i = 0; i < nfs; i++)
+                    if (!u || fs[u - 1] != fs[i])
+                        fs[u++] = fs[i];
+                emit_set_function_starts(fs, u);
+                free(fs);
+            }
+        }
+
         u32 section_job_count =
             (num_insts + EMIT_CHUNK_INSTRUCTIONS - 1u) / EMIT_CHUNK_INSTRUCTIONS;
         ChunkJob* chunk_jobs = (ChunkJob*)calloc(section_job_count, sizeof(ChunkJob));
@@ -1197,6 +1218,8 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         return 0;
     if (!native_regions_apply(chunks_dir))
         return 0;
+    if (!native_leaves_apply(chunks_dir))
+        return 0;
     return 1;
 }
 
@@ -1257,6 +1280,8 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
             const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, (int)i) : NULL;
             if (!data)
                 continue;
+            /* --jump-tables reads its tables from here (copied; a no-op without the flag's lookups). */
+            emit_add_data_section(dol->header.data_addresses[i], dol->header.data_sizes[i], data);
             for (u32 k = 0; k + 4u <= dol->header.data_sizes[i]; k += 4u) {
                 u32 word = read_be32(data + k);
                 if ((word & 3u) != 0)

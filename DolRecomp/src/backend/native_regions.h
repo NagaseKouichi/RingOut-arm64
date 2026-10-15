@@ -11,4 +11,10 @@ unsigned native_regions_count(void);
 void native_regions_reset(void);
 /* Post-pass over the written chunk files (after --native-skin). true unless a file could not be read or written. */
 bool native_regions_apply(const char* chunks_dir);
+/* --region-psq: float psq_l/psq_st in regions go straight to and from the nF/nP locals (default off). */
+void native_regions_set_psq_direct(bool on);
+/* --inline-leaves <N>: small leaf callees (at most N instructions) inlined at their native call sites.
+ * Post-pass after native_regions_apply; 0 = off. */
+void native_leaves_set(unsigned max_insns);
+bool native_leaves_apply(const char* chunks_dir);
 #endif

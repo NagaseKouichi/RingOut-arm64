@@ -88,6 +88,10 @@ typedef struct { u32 start, end; bool exits; } Region; /* exits: the optional `x
 static Region* s_regions = NULL;
 static size_t s_region_count = 0;
 static bool s_enabled = false;
+/* --region-psq: float psq_l/psq_st (GQR0, not w, not indexed) move straight between guest RAM and the region's
+ * nF/nP locals when the helper's own fast-path test holds; anything else takes the helper as before. */
+static bool s_psq_direct = false;
+void native_regions_set_psq_direct(bool on) { s_psq_direct = on; }
 
 bool native_regions_load(const char* path) {
     FILE* f = fopen(path, "r");
@@ -221,6 +225,33 @@ static char* sub_word(const char* l, const char* pre, const char* to, bool* set)
     return str_take(&o);
 }
 static void collect_word(const char* l, const char* pre, bool* set) { free(sub_word(l, pre, "", set)); }
+/* `nG4 = nG4 = (e);` -> `nG4 = (e);`. A write-through twin line `dr_g4 = ctx->gpr[4] = (e);` names ONE local on both
+ * sides once renamed, and `x = x = e` modifies x twice with no sequence point between: undefined behaviour in C
+ * (clang -Wunsequenced), even though every compiler simply stores e twice. */
+static char* drop_self_assign(char* l) {
+    Str o = {0};
+    const char* p = l;
+    bool changed = false;
+    while (*p) {
+        if ((p == l || !is_word(p[-1])) && p[0] == 'n') {
+            const char* q = p;
+            while (is_word(*q)) q++;
+            size_t n = (size_t)(q - p);
+            if (n >= 2 && strncmp(q, " = ", 3) == 0 && strncmp(q + 3, p, n) == 0 && !is_word(q[3 + n]) &&
+                strncmp(q + 3 + n, " = ", 3) == 0) {
+                str_add(&o, p, n + 3);   /* "nG4 = " */
+                p = q + 6 + n;           /* past the second "nG4 = " */
+                changed = true;
+                continue;
+            }
+        }
+        str_add(&o, p, 1);
+        p++;
+    }
+    if (!changed) { free(o.p); return l; }
+    free(l);
+    return str_take(&o);
+}
 static void collect_index(const char* l, const char* pre, bool* set) { free(sub_index(l, pre, "", set)); }
 static char* replace_all(const char* l, const char* from, const char* to) {
     Str o = {0};
@@ -747,12 +778,17 @@ static char* transform(char** src, size_t a, size_t b, u32 start, u32 end, const
     bool fp = false, have_block = false, have_inst = false, prev_label = false;
     u32 block_pc = 0, inst_pc = 0, block_dc = 0;
     bool after_pc = false;
+    bool psq_open = false;
     int inl = 0;
     char* result = NULL;
     *why = NULL;
     for (size_t i = 0; i < region.n && !*why; i++) {
+        if (psq_open && !strstr(region.v[i], "ctx->exception")) { *why = "psq helper without its exception check"; break; }
         char* l = strdup(region.v[i]);
         const char* s = lskip(l);
+        /* --indirect-calls: a native call here would run with the region's guest registers still in C locals.
+           Dropping the macro line leaves the ordinary exit after it -- write back, return -- as before the flag. */
+        if (starts(s, "DOLRECOMP_INDIRECT_CALL(")) { free(l); continue; }
         if (starts(l, "/*NREG_INLINE_BEGIN")) { inl++; lines_push(&out, l); continue; }
         if (starts(l, "/*NREG_INLINE_END")) { inl--; lines_push(&out, l); continue; }
         u32 pc;
@@ -863,9 +899,23 @@ static char* transform(char** src, size_t a, size_t b, u32 start, u32 end, const
                     if (starts(q, "u, ") && n < 32) {
                         F[n] = true;
                         char* l2 = sub_index(l, "ctx->gpr", "nG", G);
-                        char buf[96];
+                        char buf[192];
                         Str o = {0};
                         str_add(&o, l, ind);
+                        /* --region-psq: only the exact float form; the helper call becomes the else branch, closed
+                         * after the exception check that follows it */
+                        if (s_psq_direct && starts(q, "u, ea, false, 0u, false, 0x")) {
+                            Str f = {0};
+                            str_add(&f, l, ind);
+                            if (pq == pl)
+                                snprintf(buf, sizeof(buf), "if (__builtin_expect(nreg_q0_ok(ctx, ea), 1)) NREG_PSQ_L2(ea, nF%u, nP%u); else {", n, n);
+                            else
+                                snprintf(buf, sizeof(buf), "if (__builtin_expect(nreg_q0_ok(ctx, ea), 1)) { u8* h = NREG_H(ea); dolrecomp_clear_reservation(ctx, ea); "
+                                         "dolrecomp_journal_cached(ctx, h, 8u); NREG_PSQ_S2(h, nF%u, nP%u); } else {", n, n);
+                            str_puts(&f, buf);
+                            lines_push(&out, str_take(&f));
+                            psq_open = true;
+                        }
                         if (pq == pl) {
                             snprintf(buf, sizeof(buf), "nF%u = ctx->fpr[%u]; nP%u = ctx->ps1[%u];", n, n, n, n);
                             str_puts(&o, buf);
@@ -910,8 +960,17 @@ static char* transform(char** src, size_t a, size_t b, u32 start, u32 end, const
         u = sub_word(l, "dr_g", "nG", NULL); free(l); l = u;
         u = sub_word(l, "dr_c", "nC", NULL); free(l); l = u;
         u = sub_index(l, "ctx->crf", "nC", NULL); free(l); l = u;
+        l = drop_self_assign(l);
         lines_push(&out, l);
+        if (psq_open && strstr(l, "ctx->exception")) {
+            Str c = {0};
+            str_add(&c, l, ind);
+            str_puts(&c, "}");
+            lines_push(&out, str_take(&c));
+            psq_open = false;
+        }
     }
+    if (!*why && psq_open) *why = "psq helper without its exception check";
     if (!*why) {
         Str o = {0};
         str_printf(&o, "    /* NATIVE REGION %08X..%08X (native_regions.c) */\n", start, end - 4);
@@ -994,6 +1053,22 @@ static const char kHelpers[] =
     "#define NREG_CALL_EXIT_START(pc) do { NAT_WB(); goto nreg_o_##pc; } while (0)\n"
     "/* ---- end NATIVE REGION helpers ---- */\n";
 
+static const char kPsqHelpers[] =
+    "/* ---- --region-psq helpers (native_regions.c): the float fast path of dolrecomp_psq_*_inline_r ---- */\n"
+    "NREG_FN bool nreg_q0_ok(const CPUState* c, u32 ea) {\n"
+    "    return (c->gqr[0] & 0x00070007u) == 0u && (ea & 3u) == 0u &&\n"
+    "           (c->hid2 & (PPC_HID2_PSE | PPC_HID2_LSQE)) == (PPC_HID2_PSE | PPC_HID2_LSQE) && nreg_in_ram(ea, 8u);\n"
+    "}\n"
+    "#if defined(DOLRECOMP_PSQ_SIMD_ON)\n"
+    "#define NREG_PSQ_L2(ea_, a, b) dolrecomp_psq_load2(NREG_H(ea_), &(a), &(b))\n"
+    "#define NREG_PSQ_S2(h, a, b) dolrecomp_psq_store2((h), (a), (b))\n"
+    "#else\n"
+    "#define NREG_PSQ_L2(ea_, a, b) do { const u8* h = NREG_H(ea_); (a) = dolrecomp_psq_single_value(read_be32(h)); \\\n"
+    "    (b) = dolrecomp_psq_single_value(read_be32(h + 4)); } while (0)\n"
+    "#define NREG_PSQ_S2(h, a, b) do { write_be32((h), dolrecomp_psq_single_bits(a)); write_be32((h) + 4, dolrecomp_psq_single_bits(b)); } while (0)\n"
+    "#endif\n"
+    "/* ---- end --region-psq helpers ---- */\n";
+
 static bool write_chunk(Chunk* c) {
     FILE* w = fopen(c->path, "wb");
     if (!w) { fprintf(stderr, "native-regions: cannot write %s\n", c->path); return false; }
@@ -1003,6 +1078,7 @@ static bool write_chunk(Chunk* c) {
         if (i + 1 < c->work.n) fputs("\n", w);
         if (!header && i + 1 < c->work.n && strcmp(c->work.v[i], "#include \"../generated.h\"") == 0) {
             fputs(kHelpers, w);
+            if (s_psq_direct) fputs(kPsqHelpers, w);
             header = true;
         }
     }
@@ -1157,5 +1233,250 @@ bool native_regions_apply(const char* chunks_dir) {
     s_fn_n = s_fn_cap = 0;
     printf("native-regions: %u of %u regions made native (%u copies, %u resume entries, %u calls inlined, %u skipped), "
            "%u chunk files\n", made, (unsigned)s_region_count, copies, resumes, calls, skipped, files);
+    return ok;
+}
+
+/* ---- --inline-leaves N: small leaf callees inlined at their native call sites ----
+ *
+ * Every native direct call (`ctx->lr = RET; ctx->pc = T; if (dolrecomp_call_enter()) { ... func_X(ctx); ... }
+ * DOLRECOMP_RETURN;`) whose callee is a small straight-line leaf becomes a copy of the callee's emitted body,
+ * with its labels renamed per site and its blr sending a return to RET straight to label_RET. Every other exit
+ * of the copy leaves the guest exactly as the call would have (LR already set, ctx up to date, the cycle charge
+ * taken block by block), so the frame hash cannot move.
+ *
+ * A callee qualifies when, from its entry, it reaches a blr within N instructions with every branch forward and
+ * inside, and contains nothing that touches LR/CTR/MSR/SPRs, syncs, reserves or moves many registers. Its body
+ * is the COLD copy's text (every register in ctx; the caller reloads its write-through locals at the return),
+ * or, when the site is in a fast copy that holds the callee too, that copy's own text. Region and skin code is
+ * never copied.
+ *
+ * Steam Deck, US, idle VS route, both arms PGO-retrained, n=8: -1.08% and -1.19% cycles in two runs, -1.38%
+ * instructions, frame hashes identical (prototype: inline.py, all sites, N=64). Inlining only the hottest 800
+ * sites LOST (+0.41%), and inlining region callees too LOST (+1.70%: the module grew from 55 to 76 MB). */
+static unsigned s_leaf_max = 0;
+void native_leaves_set(unsigned max_insns) { s_leaf_max = max_insns; }
+
+static const char* const kLeafForbid[] = {
+    "bl", "bctrl", "blrl", "bctr", "bcctr", "bclr", "mtlr", "mflr", "mtctr", "mfctr", "sc", "rfi", "mtmsr",
+    "mfmsr", "mtspr", "mfspr", "isync", "sync", "eieio", "icbi", "dcbi", "dcbf", "dcbst", "dcbz", "dcbz_l",
+    "lwarx", "stwcx.", "mtsr", "mtfsf", "mtfsfi", "mtfsb0", "mtfsb1", "mffs", "tw", "twi", "stmw", "lmw", NULL};
+
+/* [f, end) or 0: straight-line forward code from f to a blr no branch jumps past, within s_leaf_max. */
+static u32 leaf_extent(u32 f) {
+    u32 maxfwd = 0;
+    for (u32 n = 0, pc = f; n < s_leaf_max; n++, pc += 4) {
+        const Insn* in = asm_at(pc);
+        if (!in || !strcmp(in->op, "?")) return 0;
+        for (const char* const* x = kLeafForbid; *x; x++)
+            if (!strcmp(in->op, *x)) return 0;
+        if (!strcmp(in->op, "blr")) {
+            if (maxfwd <= pc) return pc + 4;
+            continue;
+        }
+        if (in->op[0] == 'b') {   /* b, bc, bdnz, ...: forward, to a known pc */
+            u32 t;
+            if (!branch_target(in->args, &t) || t <= pc) return 0;
+            if (t > maxfwd) maxfwd = t;
+        }
+    }
+    return 0;
+}
+static bool in_any_region(u32 a, u32 b) {
+    for (size_t r = 0; r < s_region_count; r++)
+        if (s_regions[r].start < b && a < s_regions[r].end) return true;
+    return false;
+}
+static long fast_line(const Lines* L) {
+    for (size_t i = 0; i < L->n; i++)
+        if (strcmp(L->v[i], "/* ---- fast copy ---- */") == 0) return (long)i;
+    return (long)L->n;
+}
+/* `label_<pc>:` in L[from, to), or -1 */
+static long label_in(const Lines* L, u32 pc, size_t from, size_t to) {
+    char want[24];
+    snprintf(want, sizeof(want), "label_%08X:", pc);
+    for (size_t i = from; i < to && i < L->n; i++)
+        if (strcmp(L->v[i], want) == 0) return (long)i;
+    return -1;
+}
+/* the token `goto NAME;` at p: NAME's length, or 0 */
+static size_t word_len(const char* p) { size_t k = 0; while (is_word(p[k])) k++; return k; }
+
+typedef struct { Lines body; char (*labels)[16]; size_t nlabels; bool ok; bool fast; } LeafBody;
+
+/* Lines [label_f, first line at or past end) of L starting at line a. false if anything in it is not plain
+ * emitted code or a goto leaves it. */
+static bool leaf_span(const Lines* L, long a, u32 end, LeafBody* out) {
+    size_t e = (size_t)a + 1;
+    for (; e < L->n; e++) {
+        const char* l = L->v[e];
+        u32 pc;
+        if (match_label(l, &pc) == 1 && pc >= end) break;
+        if (starts(l, "    // ") && hex8(l + 7, &pc) && l[15] == ':' && pc >= end) break;
+        if (strcmp(l, "}") == 0) break;
+    }
+    out->nlabels = 0;
+    out->labels = malloc((e - (size_t)a) * sizeof(*out->labels));
+    for (size_t i = (size_t)a; i < e; i++) {
+        const char* l = L->v[i];
+        if (strstr(l, "NAT_") || strstr(l, "nreg") || strstr(l, "nskin") || strstr(l, "NREG") ||
+            strstr(l, "dolrecomp_call_enter"))
+            return false;
+        u32 pc;
+        if (match_label(l, &pc)) {
+            size_t k = (size_t)(strchr(l, ':') - l);
+            memcpy(out->labels[out->nlabels], l, k);
+            out->labels[out->nlabels++][k] = 0;
+        }
+    }
+    for (size_t i = (size_t)a; i < e; i++)
+        for (const char* p = strstr(L->v[i], "goto "); p; p = strstr(p + 5, "goto ")) {
+            size_t k = word_len(p + 5);
+            bool found = false;
+            for (size_t j = 0; j < out->nlabels && !found; j++)
+                found = strlen(out->labels[j]) == k && strncmp(out->labels[j], p + 5, k) == 0;
+            if (!found) return false;
+        }
+    for (size_t i = (size_t)a; i < e; i++) lines_push(&out->body, strdup(L->v[i]));
+    return true;
+}
+static void leaf_free(LeafBody* b) { lines_free(&b->body); free(b->labels); b->labels = NULL; }
+
+/* One body line for site `sfx` returning to `ret`: labels renamed, `ctx->pc = target;` (the blr) turned into
+ * a goto when the return address is the call's own. */
+static char* leaf_line(const char* l, const LeafBody* b, const char* sfx, u32 ret, const char* reload, unsigned* n_ret) {
+    Str o = {0};
+    const char* p = l;
+    while (*p) {
+        if ((p == l || !is_word(p[-1])) && (starts(p, "label_") || starts(p, "fpok_"))) {
+            size_t k = word_len(p);
+            bool hit = false;
+            for (size_t j = 0; j < b->nlabels && !hit; j++)
+                hit = strlen(b->labels[j]) == k && strncmp(b->labels[j], p, k) == 0;
+            str_add(&o, p, k);
+            if (hit) str_puts(&o, sfx);
+            p += k;
+            continue;
+        }
+        if (starts(p, "ctx->pc = target;")) {
+            str_printf(&o, "if (target == 0x%08Xu) { %s%sgoto label_%08X; } ", ret, reload, *reload ? " " : "", ret);
+            (*n_ret)++;
+        }
+        str_add(&o, p, 1);
+        p++;
+    }
+    return str_take(&o);
+}
+
+/* the call block at line i: the `}` closing its enter-if (j) and the DOLRECOMP_RETURN after it (k) */
+static bool call_block(const Lines* L, size_t i, size_t* j_out, size_t* k_out, const char** reload) {
+    size_t j = i + 3, k;
+    *reload = NULL;
+    for (; j < L->n && !strip_eq(L->v[j], "}"); j++)
+        if (strstr(L->v[j], "DOLRECOMP_DC_RELOAD(ctx);")) *reload = L->v[j];
+    for (k = j + 1; k < L->n && !strip_eq(L->v[k], "DOLRECOMP_RETURN;"); k++) {}
+    *j_out = j;
+    *k_out = k;
+    return j < L->n && k < L->n && *reload;
+}
+/* the callee's body for a site at line i of chunk c: that fast copy's own text when the site is in a fast copy
+ * that holds the callee, else the cold copy in the callee's home chunk */
+static bool leaf_body(Chunk* c, size_t i, u32 t, u32 end, LeafBody* b) {
+    long fast = fast_line(&c->orig);
+    memset(b, 0, sizeof(*b));
+    if ((long)i > fast) {
+        long a = label_in(&c->orig, t, (size_t)fast, c->orig.n);
+        if (a >= 0) {
+            b->fast = true;
+            if (leaf_span(&c->orig, a, end, b)) return true;
+        }
+        leaf_free(b);
+        memset(b, 0, sizeof(*b));
+    }
+    Chunk* h = chunk_for(t);
+    if (!h || !chunk_load(h)) return false;
+    long a = label_in(&h->orig, t, 0, (size_t)fast_line(&h->orig));
+    return a >= 0 && leaf_span(&h->orig, a, end, b);
+}
+static bool write_lines(const char* path, const Lines* L) {
+    FILE* w = fopen(path, "wb");
+    if (!w) { fprintf(stderr, "inline-leaves: cannot write %s\n", path); return false; }
+    for (size_t i = 0; i < L->n; i++) {
+        fputs(L->v[i], w);
+        if (i + 1 < L->n) fputs("\n", w);
+    }
+    return fclose(w) == 0;
+}
+
+bool native_leaves_apply(const char* chunks_dir) {
+    if (!s_leaf_max) return true;
+    if (!list_chunks(chunks_dir)) return false;
+    for (size_t i = 0; i < s_chunk_n; i++) {
+        if (!chunk_load(&s_chunks[i])) return false;
+        for (size_t k = 0; k < s_chunks[i].orig.n; k++) asm_line(s_chunks[i].orig.v[k]);
+    }
+    unsigned sites = 0, refused = 0, files = 0;
+    bool ok = true;
+    for (size_t ci = 0; ci < s_chunk_n; ci++) {
+        Chunk* c = &s_chunks[ci];
+        const Lines* L = &c->orig;
+        unsigned here = 0;
+        for (size_t i = 0; i < L->n; i++) {
+            const char* l = L->v[i];
+            u32 ret, t, end;
+            size_t j, k;
+            const char* reload;
+            LeafBody b = {0};
+            if (i + 2 >= L->n || !match_set(l, "ctx->lr = ", &ret) || !match_set(L->v[i + 1], "ctx->pc = ", &t) ||
+                !strstr(L->v[i + 2], "dolrecomp_call_enter()") || !(end = leaf_extent(t)) || in_any_region(t, end)) {
+                lines_push(&c->work, strdup(l));
+                continue;
+            }
+            if (!call_block(L, i, &j, &k, &reload) || !leaf_body(c, i, t, end, &b)) {
+                leaf_free(&b);
+                refused++;
+                lines_push(&c->work, strdup(l));
+                continue;
+            }
+            /* the caller's write-through locals, reloaded at the return (the DC was never flushed) */
+            char* locals = b.fast ? strdup("") : replace_all(lskip(reload), "DOLRECOMP_DC_RELOAD(ctx);", "");
+            char sfx[16], cm[96];
+            snprintf(sfx, sizeof(sfx), "_i%u", here);
+            snprintf(cm, sizeof(cm), "%.*s/* inlined leaf call: %08X (--inline-leaves) */", (int)indent_len(l), l, t);
+            size_t mark = c->work.n;
+            unsigned n_ret = 0;
+            lines_push(&c->work, strdup(l));
+            lines_push(&c->work, strdup(cm));
+            for (size_t q = 0; q < b.body.n; q++)
+                lines_push(&c->work, leaf_line(b.body.v[q], &b, sfx, ret, lskip(locals), &n_ret));
+            free(locals);
+            leaf_free(&b);
+            if (!n_ret) {   /* no return in the copy: keep the call */
+                while (c->work.n > mark) free(c->work.v[--c->work.n]);
+                refused++;
+                lines_push(&c->work, strdup(l));
+                continue;
+            }
+            here++;
+            i = k;   /* the whole call block is replaced */
+        }
+        if (here) { ok = write_lines(c->path, &c->work) && ok; files++; sites += here; }
+    }
+    for (size_t i = 0; i < s_chunk_n; i++) {
+        lines_free(&s_chunks[i].work);
+        lines_free(&s_chunks[i].orig);
+        free(s_chunks[i].path);
+    }
+    free(s_chunks);
+    s_chunks = NULL;
+    s_chunk_n = 0;
+    for (size_t i = 0; i < s_asm_n; i++) { free(s_asm[i].op); free(s_asm[i].args); }
+    free(s_asm);
+    s_asm = NULL;
+    s_asm_n = 0;
+    free(s_fn);
+    s_fn = NULL;
+    s_fn_n = s_fn_cap = 0;
+    printf("inline-leaves: %u call sites inlined (%u refused), %u chunk files\n", sites, refused, files);
     return ok;
 }

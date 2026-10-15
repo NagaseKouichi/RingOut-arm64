@@ -724,6 +724,199 @@ static void test_crlf_chunks_patched(void) {
     free(before); free(b); free(log); rm_tmp(dir);
 }
 
+/* --indirect-calls: a native call inside a region would run with the guest registers still in C locals, so the
+ * pass drops the DOLRECOMP_INDIRECT_CALL line there and the bctrl exits as it always did; the original code
+ * outside the region keeps the native call. */
+static void test_indirect_call_dropped_in_region(void) {
+    const char* T = "indirect_call_dropped_in_region";
+    u32 w[2 * WIN];
+    for (u32 i = 0; i < 2 * WIN; i++) w[i] = 0x60000000u; /* nop */
+    w[WIN - 1] = 0x4E800020u;                           /* blr: window 1 ends */
+    u32 k = WIN;
+    w[k++] = 0x38600000u; /* 40 li    r3, 0     */
+    w[k++] = 0x38630001u; /* 44 addi  r3, r3, 1 */
+    w[k++] = 0x7D8903A6u; /* 48 mtctr r12       */
+    w[k++] = 0x4E800421u; /* 4C bctrl           */
+    w[k++] = 0x38630002u; /* 50 addi  r3, r3, 2 */
+    w[k++] = 0x4E800020u; /* 54 blr             */
+    w[2 * WIN - 1] = 0x4E800020u;
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x50};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    emit_set_indirect_calls(true);
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 0, hot, 3, dir), "fixture generated");
+    emit_set_indirect_calls(false);
+    char* before = chunk_text(dir, 1);
+    expect(T, before && strstr(before, "DOLRECOMP_INDIRECT_CALL(target, 0x80100050u, label_80100050);"),
+           "the emitter wrote the native call");
+    free(before);
+    expect(T, apply(dir, "80100040 80100058\n", &log), "pass ran");
+    char* b = chunk_text(dir, 1);
+    const char* r = b ? strstr(b, "/* NATIVE REGION 80100040") : NULL;
+    const char* r_end = r ? strstr(r, "#undef NAT_RL") : NULL;
+    expect(T, r && r_end, "region made native");
+    if (r && r_end) {
+        const char* m = strstr(r, "DOLRECOMP_INDIRECT_CALL(");
+        expect(T, !m || m > r_end, "no native call inside the region");
+        expect(T, m != NULL, "the original code after the region keeps it");
+    }
+    if (!r) fprintf(stderr, "--- %s log:\n%s\n", T, log ? log : "(none)");
+    free(b); free(log); rm_tmp(dir);
+}
+
+/* ---- --inline-leaves ---- */
+static bool apply_leaves(const char* dir, unsigned max, char** log) {
+    char chunks[1024], logp[1024];
+    snprintf(chunks, sizeof(chunks), "%s/chunks", dir);
+    snprintf(logp, sizeof(logp), "%s/leaves.log", dir);
+    native_regions_reset();
+    native_leaves_set(max);
+    fflush(stdout);
+    int saved = dup(1);
+    FILE* lf = freopen(logp, "w", stdout);
+    bool ok = lf && native_leaves_apply(chunks);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    native_leaves_set(0);
+    *log = slurp(logp);
+    return ok && *log;
+}
+
+/* Window 2: a caller at 0x40 calls the callee at 0x54 (a self call). */
+static void leaf_program(u32* w, bool loop) {
+    for (u32 i = 0; i < 2 * WIN; i++) w[i] = 0x60000000u;
+    w[WIN - 1] = 0x48000004u;
+    u32 k = WIN;
+    w[k++] = 0x38800010u; /* 40 li    r4, 16             */
+    w[k++] = 0x48000011u; /* 44 bl    0x80100054         */
+    w[k++] = 0x90640000u; /* 48 stw   r3, 0(r4)          */
+    w[k++] = 0x4E800020u; /* 4C blr                      */
+    k = WIN + 5;
+    w[k++] = 0x80640000u; /* 54 lwz   r3, 0(r4)          */
+    w[k++] = 0x2C030000u; /* 58 cmpwi r3, 0              */
+    w[k++] = loop ? 0x4082FFFCu   /* 5C bne   0x80100058 (backward: a loop) */
+                  : 0x41820008u;  /* 5C beq   0x80100064 (forward)          */
+    w[k++] = 0x38630001u; /* 60 addi  r3, r3, 1          */
+    w[k++] = 0x4E800020u; /* 64 blr                      */
+}
+
+static void test_leaf_inlined_both_copies(void) {
+    const char* T = "leaf_inlined_both_copies";
+    u32 w[2 * WIN];
+    leaf_program(w, false);
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x54};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 0, hot, 3, dir), "fixture generated");
+    expect(T, apply_leaves(dir, 64, &log), "pass ran");
+    char* b = chunk_text(dir, 1);
+    expect(T, b && count_of(b, "/* inlined leaf call: 80100054") == 2, "inlined in the cold AND the fast copy");
+    expect(T, b && count_of(b, "func_80100040(ctx);") == 0, "no call left");
+    expect(T, b && count_of(b, "if (target == 0x80100048u) {") == 2, "the blr returns to the call's label");
+    expect(T, b && labels_unique(b), "labels unique");
+    expect(T, log && strstr(log, "inline-leaves: 2 call sites inlined"), "reported");
+    if (failures) fprintf(stderr, "--- %s log:\n%s\n", T, log ? log : "(none)");
+    free(b); free(log); rm_tmp(dir);
+}
+
+static void test_leaf_loop_not_inlined(void) {
+    const char* T = "leaf_loop_not_inlined";
+    u32 w[2 * WIN];
+    leaf_program(w, true);
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x54};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 0, hot, 3, dir), "fixture generated");
+    char* before = chunk_text(dir, 1);
+    expect(T, apply_leaves(dir, 64, &log), "pass ran");
+    char* b = chunk_text(dir, 1);
+    expect(T, b && before && strcmp(b, before) == 0, "a callee with a loop stays a call");
+    free(before); free(b); free(log); rm_tmp(dir);
+}
+
+static void test_leaf_off_untouched(void) {
+    const char* T = "leaf_off_untouched";
+    u32 w[2 * WIN];
+    leaf_program(w, false);
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x54};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 0, hot, 3, dir), "fixture generated");
+    char* before = chunk_text(dir, 1);
+    expect(T, apply_leaves(dir, 0, &log), "pass ran");
+    char* b = chunk_text(dir, 1);
+    expect(T, b && before && strcmp(b, before) == 0, "off: nothing changes");
+    free(before); free(b); free(log); rm_tmp(dir);
+}
+
+/* --region-psq: a float psq_l/psq_st pair in a loop gets the direct path, with the helper (and its exception check)
+ * as the else branch; a quantised psq_l (GQR6) keeps the helper alone; with the flag off nothing changes. */
+static const char* lskip_t(const char* p) { while (*p == ' ') p++; return p; }
+
+static void psq_loop_program(u32* w, u32 load) {
+    for (u32 i = 0; i < 2 * WIN; i++) w[i] = 0x60000000u;
+    w[WIN - 1] = 0x48000004u;
+    u32 k = WIN;
+    w[k++] = 0x39200004u; /* 40 li     r9, 4           */
+    w[k++] = 0x7D2903A6u; /* 44 mtctr  r9              */
+    w[k++] = load;        /* 48 psq_l  f1, 0(r4), 0, q */
+    w[k++] = 0x1021082Au; /* 4C ps_add f1, f1, f1      */
+    w[k++] = 0x60000000u; /* 50                        */
+    w[k++] = 0xF0240000u; /* 54 psq_st f1, 0(r4), 0, 0 */
+    w[k++] = 0x4200FFF0u; /* 58 bdnz   0x80100048      */
+    w[k++] = 0x4E800020u; /* 5C blr                    */
+    w[2 * WIN - 1] = 0x4E800020u;
+}
+
+static char* psq_region_text(const char* T, u32 load, bool flag) {
+    u32 w[2 * WIN];
+    psq_loop_program(w, load);
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x48};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 8, hot, 3, dir), "fixture generated");
+    native_regions_set_psq_direct(flag);
+    expect(T, apply(dir, "80100040 8010005C\n", &log), "pass ran");
+    native_regions_set_psq_direct(false);
+    char* b = chunk_text(dir, 1);
+    expect(T, b && strstr(b, "/* NATIVE REGION 80100040"), "region made native");
+    if (b && !strstr(b, "/* NATIVE REGION 80100040")) fprintf(stderr, "--- %s log:\n%s\n", T, log ? log : "(none)");
+    free(log); rm_tmp(dir);
+    return b;
+}
+
+static void test_region_psq_direct(void) {
+    const char* T = "region_psq_direct";
+    char* b = psq_region_text(T, 0xE0240000u /* psq_l f1, 0(r4), 0, 0 */, true);
+    expect(T, b && strstr(b, "NREG_FN bool nreg_q0_ok("), "helpers written");
+    expect(T, b && strstr(b, "if (__builtin_expect(nreg_q0_ok(ctx, ea), 1)) NREG_PSQ_L2(ea, nF1, nP1); else {"), "load fast path");
+    expect(T, b && strstr(b, "NREG_PSQ_S2(h, nF1, nP1); } else {"), "store fast path");
+    expect(T, b && strstr(b, "ppc_psq_load(ctx, 1u") && strstr(b, "ppc_psq_store(ctx, 1u"), "helpers kept as the fallback");
+    /* the else block closes right after the helper's exception check */
+    const char* e = b ? strstr(b, "nP1 = ctx->ps1[1];") : NULL;
+    const char* x = e ? strstr(e, "ctx->exception") : NULL;
+    const char* nl = x ? strchr(x, '\n') : NULL;
+    expect(T, nl && strncmp(lskip_t(nl + 1), "}\n", 2) == 0, "else closed after the exception check");
+    free(b);
+}
+
+static void test_region_psq_quantised_untouched(void) {
+    const char* T = "region_psq_quantised_untouched";
+    char* b = psq_region_text(T, 0xE0246000u /* psq_l f1, 0(r4), 0, 6 */, true);
+    expect(T, b && strstr(b, "ppc_psq_load(ctx, 1u, ea, false, 6u"), "quantised load on the helper");
+    expect(T, b && !strstr(b, "NREG_PSQ_L2(ea, "), "no direct load for GQR6");
+    expect(T, b && strstr(b, "NREG_PSQ_S2(h, nF1, nP1)"), "the float store still direct");
+    free(b);
+}
+
+static void test_region_psq_off_untouched(void) {
+    const char* T = "region_psq_off_untouched";
+    char* b = psq_region_text(T, 0xE0240000u, false);
+    expect(T, b && !strstr(b, "nreg_q0_ok"), "flag off: no fast path, no helpers");
+    free(b);
+}
+
 int main(void) {
     test_overhang_copy_patched();
     test_partial_span_not_patched();
@@ -746,6 +939,13 @@ int main(void) {
     test_call_exit_refunds();
     test_inlined_call_resyncs_twins();
     test_crlf_chunks_patched();
+    test_indirect_call_dropped_in_region();
+    test_leaf_inlined_both_copies();
+    test_leaf_loop_not_inlined();
+    test_leaf_off_untouched();
+    test_region_psq_direct();
+    test_region_psq_quantised_untouched();
+    test_region_psq_off_untouched();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

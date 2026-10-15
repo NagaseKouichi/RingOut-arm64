@@ -89,7 +89,7 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   u8* const vmem = memory.GetFakeVMEM();
   const u32 vmem_size = memory.GetFakeVMemSize();
 
-  const s64 native_charge = -m_core.m_guest.downcount;
+  const s64 native_charge = m_core.m_dc_bias - m_core.m_guest.downcount;
   if (native_charge <= 0)
   {
     ++m_ls_skipped_zero;

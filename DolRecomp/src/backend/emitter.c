@@ -447,7 +447,17 @@ static void emit_branch_condition(FILE* out, u8 bo, u8 bi) {
  * deliberate relaxation -- large enough that a hot loop stops paying dispatcher
  * overhead per iteration, small enough that interrupt latency stays in the same
  * ballpark as a CachedInterpreter block. */
-#define DOLRECOMP_LOOP_BUDGET 1000
+#define DOLRECOMP_LOOP_BUDGET_DEFAULT 1000u
+/* --loop-budget. Measured 2026-10-08 (US, Deck, both arms retrained): 4000 is worth nothing on its own (-0.26%,
+ * overlapping) but -2.3% on top of --function-overhang, which keeps the RNG function's calls native so its loop
+ * hits the budget mid-call and unwinds the whole native call stack through the dispatcher. A longer budget also
+ * lets an event run that much later, and mftb reads a timebase advanced only at dispatches. */
+static u32 s_loop_budget = DOLRECOMP_LOOP_BUDGET_DEFAULT;
+void emit_set_loop_budget(u32 cycles) { s_loop_budget = cycles ? cycles : DOLRECOMP_LOOP_BUDGET_DEFAULT; }
+u32 emit_loop_budget(void) { return s_loop_budget; }
+static int s_dynamic_loop_budget;
+void emit_set_dynamic_loop_budget(int enabled) { s_dynamic_loop_budget = enabled; }
+int emit_dynamic_loop_budget_enabled(void) { return s_dynamic_loop_budget; }
 
 /* Back-edges to this address keep returning to the dispatcher. The chassis
  * recognises the guest's OS idle spin loop by PC and calls CoreTiming::Idle()
@@ -629,11 +639,41 @@ static bool must_reach_dispatcher(u32 pc) {
  * forced out), and embedded data. The budget is an upper bound: an overhang
  * that would run out of it before an exit is not taken at all. */
 static u32 s_overhang_max = 0;
+/* --function-overhang <max>. The default rule stops at the first instruction that cannot fall through, which is
+ * right for a loop but not for a function: measured on the US disc, the RNG function 0x8000C1F4 (called ~2000
+ * times a frame) jumps from its head past that point to its epilogue in the next window on every call, so each
+ * call left the chunk (a direct-call miss) and returned through the dispatcher (a blr): 29% of all fight
+ * dispatches. Running the overhang to the next function start keeps the call native to its blr. The next
+ * function start is the next bl target; nothing else enters that span except through the next chunk's entry
+ * switch, which still owns those addresses. Same stops as the default rule; falls back to it otherwise. */
+static u32 s_function_overhang_max = 0;
+static u32* s_func_starts = NULL;
+static u32 s_func_start_count = 0;
 /* End of the window of the chunk being emitted: calls INTO the overhang go to
    the owning chunk, whose switch has the case. Per worker thread. */
 static DR_THREAD_LOCAL u32 s_own_end = 0;
 
 void emit_set_chunk_overhang(u32 max_insts) { s_overhang_max = max_insts; }
+void emit_set_function_overhang(u32 max_insts) { s_function_overhang_max = max_insts; }
+void emit_set_function_starts(const u32* starts, u32 count) {
+    free(s_func_starts);
+    s_func_starts = NULL;
+    s_func_start_count = 0;
+    if (!starts || !count) return;
+    s_func_starts = (u32*)malloc((size_t)count * sizeof(u32));
+    if (!s_func_starts) return;   /* degrades to the default rule */
+    memcpy(s_func_starts, starts, (size_t)count * sizeof(u32));
+    s_func_start_count = count;
+}
+/* The first function start at or after addr, or 0. */
+static u32 next_function_start(u32 addr) {
+    u32 lo = 0, hi = s_func_start_count;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (s_func_starts[mid] < addr) lo = mid + 1u; else hi = mid;
+    }
+    return lo < s_func_start_count ? s_func_starts[lo] : 0u;
+}
 
 static bool inst_never_falls_through(const PPCInst* inst) {
     switch (inst->op) {
@@ -653,6 +693,28 @@ static bool inst_never_falls_through(const PPCInst* inst) {
 u32 emit_overhang_length(const PPCInst* insts, u32 own, u32 available,
                          const u32* stop_ranges, u32 stop_range_count) {
     u32 n;
+    if (s_function_overhang_max && s_func_start_count && available) {
+        u32 edge = insts[own].address;
+        u32 fs = next_function_start(edge);
+        if (fs > edge) {
+            u32 want = (fs - edge) / 4u;
+            if (want <= available && want <= s_function_overhang_max) {
+                for (n = 0; n < want; n++) {
+                    const PPCInst* inst = &insts[own + n];
+                    u32 r;
+                    if (inst->embedded_data || must_reach_dispatcher(inst->address))
+                        break;
+                    for (r = 0; r < stop_range_count; r++)
+                        if (inst->address >= stop_ranges[2 * r] && inst->address <= stop_ranges[2 * r + 1])
+                            break;
+                    if (r < stop_range_count)
+                        break;
+                }
+                if (n == want)
+                    return want;
+            }
+        }
+    }
     for (n = 0; n < available && n < s_overhang_max; n++) {
         const PPCInst* inst = &insts[own + n];
         u32 r;
@@ -877,7 +939,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
         if (s_chain_calls && local_target &&
             !must_reach_dispatcher(inst->branch_target)) {
             if (local_backward) {
-                fprintf(out, "            if (DOLRECOMP_DC <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
+                fprintf(out, "            if (DOLRECOMP_DC <= -%u) {\n", s_loop_budget);
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
                 fprintf(out, "                DOLRECOMP_RETURN;\n");
                 fprintf(out, "            }\n");
@@ -910,9 +972,9 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
          * leader and charges ctx->downcount every iteration -- the counter always
          * moves, and the budget is reached in bounded time. Past the budget we
          * hand control back exactly as before, so this only ever shortens the
-         * time between dispatches, never lengthens it beyond DOLRECOMP_LOOP_BUDGET
+         * time between dispatches, never lengthens it beyond the loop budget
          * cycles. */
-        fprintf(out, "            if (DOLRECOMP_DC <= -%d) {\n", DOLRECOMP_LOOP_BUDGET);
+        fprintf(out, "            if (DOLRECOMP_DC <= -%u) {\n", s_loop_budget);
         emit_exit_stat(out, "                ", "LOOP_BUDGET");
         fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "                DOLRECOMP_RETURN;\n");
@@ -925,6 +987,151 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst, bool local_target
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            DOLRECOMP_RETURN;\n");
     }
+}
+
+/* ---- --jump-tables ---------------------------------------------------------------------------------------
+ *
+ * Every bctr returned to the dispatcher (`ctx->pc = target; return`), even when the target is a case label of a
+ * switch in the same function: measured on the US disc, 7.6% of all dispatches, plus 14.3 M exits taken inside
+ * native calls, each of which unwinds the call stack through the dispatcher. CodeWarrior compiles a switch as
+ *
+ *     cmplwi rI, N ; bgt default ; lis rB, hi ; rlwinm rO, rI, 2, 0, 29 ; addi rB, rB, lo ;
+ *     lwzx rX, rB, rO ; mtctr rX ; bctr
+ *
+ * so the table is (hi << 16) + lo with N + 1 entries, read here from the DOL's data sections. The bctr becomes
+ * `switch (target) { case T: goto label_T; ... }` over the table's targets inside this chunk, with the loop budget
+ * on backward ones, and the original exit as the default.
+ *
+ * Correct for ANY candidate set: the switch compares the RUNTIME target, so a table the game rewrote at run time,
+ * a wrong guess, or an entry outside this chunk only falls through to the old exit, and `goto label_T` when the
+ * target is T is exactly what the dispatcher would have done (T is a leader: pipeline.c makes every data word that
+ * points into text an entry target). */
+typedef struct { u32 addr, size; u8* bytes; } EmitDataSection;
+static EmitDataSection s_data[32];
+static u32 s_data_count = 0;
+static bool s_jump_tables = false;
+void emit_set_jump_tables(bool enable) { s_jump_tables = enable; }
+void emit_add_data_section(u32 addr, u32 size, const u8* bytes) {
+    if (s_data_count >= 32u || !bytes || !size) return;
+    s_data[s_data_count].bytes = (u8*)malloc(size);
+    if (!s_data[s_data_count].bytes) return;
+    memcpy(s_data[s_data_count].bytes, bytes, size);
+    s_data[s_data_count].addr = addr;
+    s_data[s_data_count].size = size;
+    s_data_count++;
+}
+static bool emit_data_word(u32 addr, u32* out) {
+    for (u32 k = 0; k < s_data_count; k++) {
+        if (addr >= s_data[k].addr && addr - s_data[k].addr + 4u <= s_data[k].size) {
+            const u8* p = s_data[k].bytes + (addr - s_data[k].addr);
+            *out = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+            return true;
+        }
+    }
+    return false;
+}
+#define EMIT_JT_MAX 512u
+/* Per worker thread: set by emit_function() for the bctr about to be emitted, read by its BCCTR case. */
+static DR_THREAD_LOCAL u32 s_jt_targets[EMIT_JT_MAX];
+static DR_THREAD_LOCAL u32 s_jt_count = 0;
+static bool inst_is_branch(const PPCInst* in) {
+    return in->op == PPC_OP_B || in->op == PPC_OP_BC || in->op == PPC_OP_BCLR || in->op == PPC_OP_BCCTR;
+}
+/* insts[i] is an unconditional bctr: find the table it indexes and keep its targets inside [start, end). */
+static u32 jt_recover(const PPCInst* insts, u32 i, u32 func_start, u32 func_end) {
+    int j, rx = -1, rb = -1, ro = -1, ri = -1;
+    bool have_lo = false, have_base = false;
+    s32 lo = 0;
+    u32 table = 0, count = 0, n = 0;
+    if (!s_jump_tables || !s_data_count)
+        return 0;
+    for (j = (int)i - 1; j >= 0 && j >= (int)i - 16; j--) {
+        const PPCInst* in = &insts[j];
+        if (in->embedded_data)
+            break;
+        if (inst_is_branch(in)) {
+            if (in->op == PPC_OP_BC)    /* the bound test's `bgt default` */
+                continue;
+            break;
+        }
+        if (rx < 0 && in->op == PPC_OP_MTSPR && in->spr == 9) { rx = in->rS; continue; }
+        if (rx >= 0 && rb < 0 && in->op == PPC_OP_LWZX && in->rD == rx) { rb = in->rA; ro = in->rB; continue; }
+        if (rb >= 0 && !have_lo && in->op == PPC_OP_ADDI && in->rD == rb && in->rA == rb) {
+            lo = in->simm; have_lo = true; continue;
+        }
+        if (have_lo && !have_base && in->op == PPC_OP_ADDIS && in->rD == rb && in->rA == 0) {
+            table = ((u32)(u16)in->simm << 16) + (u32)(s32)lo; have_base = true; continue;
+        }
+        if (ro >= 0 && ri < 0 && in->op == PPC_OP_RLWINM && in->rA == ro && in->sh == 2 && in->mb == 0 && in->me == 29) {
+            ri = in->rS; continue;
+        }
+        if (ri >= 0 && in->op == PPC_OP_CMPLI && in->rA == ri) { count = (u32)in->uimm + 1u; break; }
+    }
+    if (!have_base)
+        return 0;
+    if (count == 0 || count > EMIT_JT_MAX)
+        count = EMIT_JT_MAX;    /* no bound found: read until the data ends; extra entries are harmless */
+    for (u32 k = 0; k < count; k++) {
+        u32 w;
+        bool dup = false;
+        if (!emit_data_word(table + 4u * k, &w))
+            break;
+        if ((w & 3u) || w < func_start || w >= func_end || must_reach_dispatcher(w))
+            continue;
+        for (u32 q = 0; q < n; q++)
+            if (s_jt_targets[q] == w) { dup = true; break; }
+        if (!dup && n < EMIT_JT_MAX)
+            s_jt_targets[n++] = w;
+    }
+    return n;
+}
+static void emit_jump_table(FILE* out, const PPCInst* inst) {
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 target = ctx->ctr & ~3u;\n");
+    fprintf(out, "        switch (target) {\n");
+    for (u32 k = 0; k < s_jt_count; k++) {
+        u32 t = s_jt_targets[k];
+        if (t <= inst->address)   /* a loop shape: same budget as any back-edge */
+            fprintf(out, "        case 0x%08Xu: if (DOLRECOMP_DC <= -%u) { ctx->pc = 0x%08Xu; DOLRECOMP_RETURN; } goto label_%08X;\n",
+                    t, s_loop_budget, t, t);
+        else
+            fprintf(out, "        case 0x%08Xu: goto label_%08X;\n", t, t);
+    }
+    fprintf(out, "        default: break;\n");
+    fprintf(out, "        }\n");
+    emit_exit_stat(out, "        ", "BCTR");
+    fprintf(out, "        ctx->pc = target;\n");
+    fprintf(out, "        DOLRECOMP_RETURN;\n");
+    fprintf(out, "    }\n");
+}
+
+/* ---- --indirect-calls --------------------------------------------------------------------------------------
+ *
+ * A bctrl (a function pointer: vtables, callbacks) returned to the dispatcher, and its callee's blr came back
+ * through the dispatcher too: measured on the US disc, 7.1% of all dispatches plus the misses inside native calls.
+ * Like a --direct-calls bl, but the target is only known at run time, so the chunk comes from the dispatcher's own
+ * table (dolrecomp_find_original); hooked PCs and an installed host_call keep the dispatcher.
+ *
+ * Emitted as one macro line, DOLRECOMP_INDIRECT_CALL(...), followed by the ordinary exit: native_regions.c DROPS
+ * that line inside a region (a call there would run with the region's guest registers still in C locals), which
+ * leaves exactly the old behaviour -- write back, return to the dispatcher. */
+static bool s_indirect_calls = false;
+void emit_set_indirect_calls(bool enable) { s_indirect_calls = enable; }
+static bool emit_indirect_call(FILE* out, const PPCInst* inst, u32 func_start, u32 func_end) {
+    u32 ret = inst->address + 4u;
+    if (!s_indirect_calls || !s_direct_calls || !inst->lk || (inst->bo & 0x14u) != 0x14u)
+        return false;
+    if (!branch_target_is_local(func_start, func_end, ret))
+        return false;
+    fprintf(out, "    {\n");
+    fprintf(out, "        u32 target = ctx->ctr & ~3u;\n");
+    fprintf(out, "        ctx->lr = 0x%08Xu;\n", ret);
+    fprintf(out, "        ctx->pc = target;\n");
+    fprintf(out, "        DOLRECOMP_INDIRECT_CALL(target, 0x%08Xu, label_%08X);\n", ret, ret);
+    emit_exit_stat(out, "        ", "BCTRL");
+    fprintf(out, "        DOLRECOMP_RETURN;\n");
+    fprintf(out, "    }\n");
+    return true;
 }
 
 static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
@@ -1228,6 +1435,28 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
             "                    dolrecomp_exit_counts[i],\n"
             "                    100.0 * (double)dolrecomp_exit_counts[i] / (double)total);\n"
             "}\n");
+    }
+
+    /* --indirect-calls: the hook rule as a function of the RUNTIME target, and the call itself (see
+       emit_indirect_call). A macro line so native_regions.c can drop it inside a region. */
+    if (s_indirect_calls) {
+        fprintf(out, "\nstatic inline int dolrecomp_indirect_ok(u32 target) {\n    return 1");
+        for (u32 k = 0; k < s_dispatch_pc_count; k++)
+            fprintf(out, " && target != 0x%08Xu", s_dispatch_pcs[k]);
+        fprintf(out, ";\n}\n");
+        fprintf(out,
+            "#define DOLRECOMP_INDIRECT_CALL(t, ret, ret_label) do { \\\n"
+            "    if (!ctx->host_call && dolrecomp_indirect_ok(t)) { \\\n"
+            "        DolRecompFunction dr_ifn_ = dolrecomp_find_original(t); \\\n"
+            "        if (dr_ifn_ && dolrecomp_call_enter()) { \\\n"
+            "            DOLRECOMP_DC_FLUSH(ctx); \\\n"
+            "            dr_ifn_(ctx); \\\n"
+            "            DOLRECOMP_DC_RELOAD(ctx); \\\n"
+            "            dolrecomp_call_leave(); \\\n"
+            "            if (ctx->pc == (ret)) goto ret_label; \\\n"
+            "        } \\\n"
+            "    } \\\n"
+            "} while (0)\n");
     }
 }
 
@@ -2497,7 +2726,10 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_BCCTR:
-        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u");
+        if (s_jt_count && !inst->lk && (inst->bo & 0x14u) == 0x14u)
+            emit_jump_table(out, inst);
+        else if (!emit_indirect_call(out, inst, func_start, func_end))
+            emit_dynamic_branch(out, inst, "ctx->ctr & ~3u");
         break;
 
     case PPC_OP_TWI:
@@ -3120,7 +3352,10 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func
            nothing reads. Only elide when asked: the analysis is conservative
            but a wrong answer here is a silent divergence, not a crash. */
         s_ca_dead_here = (s_ca_elide && ca_live && !ca_live[i]) ? 1 : 0;
+        s_jt_count = (insts[i].op == PPC_OP_BCCTR && !insts[i].lk && (insts[i].bo & 0x14u) == 0x14u)
+                         ? jt_recover(insts, i, func_addr, func_end) : 0u;
         emit_instruction_with_range(out, &insts[i], func_addr, func_end);
+        s_jt_count = 0;
         if (fp_inst)
             s_fp_ok = true;
         if (insts[i].op == PPC_OP_MTMSR)

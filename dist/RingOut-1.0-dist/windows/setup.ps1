@@ -243,6 +243,12 @@ if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('
 # beside the profile; a disc without one builds as before.
 $RegionList = Join-Path $Here "module-src\profiles\$DiscId.regions"
 if (Test-Path $RegionList) { $LeaderCases += @('--native-regions', $RegionList) }
+# Fewer returns to the dispatcher, as in setup.sh (all four discs): function overhang, loop budget 4000,
+# jump tables, indirect calls; --dynamic-loop-budget lets a loop run on to the next timing event.
+if ($DiscId -in @('GRSEAF', 'GRSJAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--function-overhang', '4096', '--loop-budget', '4000', '--dynamic-loop-budget', '--jump-tables', '--indirect-calls') }
+# All four discs, as in setup.sh: leaf functions inlined at native call sites, two-lane vectors in the skin
+# loops, direct paired-single loads and stores in the native regions.
+if ($DiscId -in @('GRSEAF', 'GRSJAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--inline-leaves', '32', '--skin-simd', '--region-psq') }
 # Twin chunks, as in setup.sh: a fast copy of each chunk entered only at the
 # entry PCs a training run used (the list ships beside the profile), the
 # ordinary chunk as a cold fallback. A disc without a list builds as before.

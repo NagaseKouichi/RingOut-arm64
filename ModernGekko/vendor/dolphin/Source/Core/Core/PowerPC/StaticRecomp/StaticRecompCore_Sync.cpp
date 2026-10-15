@@ -72,7 +72,7 @@ void StaticRecompCore::SyncIn()
   m_guest.reserve_valid = ppc.reserve;
   m_guest.exception = 0;
   m_guest.program_exception = 0;
-  m_guest.downcount = 0;  // charge accumulator, not a copy of ppc.downcount
+  ArmCharge(ppc.downcount);  // charge accumulator (biased), not a copy of ppc.downcount
 
   if (m_module && m_module->on_state_loaded)
     m_module->on_state_loaded(&m_guest);
@@ -86,8 +86,9 @@ void StaticRecompCore::SyncOut()
   // Flush any cycle charge the module accumulated since the last flush
   // (matters on the mid-dispatch fallback path, where the interpreter step
   // that follows must see up-to-date time).
-  ppc.downcount += static_cast<int>(m_guest.downcount);
+  ppc.downcount += static_cast<int>(m_guest.downcount - m_dc_bias);
   m_guest.downcount = 0;
+  m_dc_bias = 0;
 
   SetPPCStateFromGuestState(m_guest, ppc);
   // Timebase is owned by Dolphin's CoreTiming; native code cannot write it.

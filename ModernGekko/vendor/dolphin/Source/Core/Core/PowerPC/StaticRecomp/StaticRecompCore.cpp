@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -436,6 +437,19 @@ void StaticRecompCore::LoadModule()
     const auto* timing =
         static_cast<const u32*>(m_library.GetSymbolAddress("staticrecomp_timing_id"));
     m_timing_id = timing ? *timing : 1u;
+  }
+  {
+    // Optional export (DolRecomp --dynamic-loop-budget): the budget the chunks were generated
+    // with. Absent or 0 keeps the fixed budget. RINGOUT_DYN_BUDGET=<n> overrides it for A/Bs and
+    // diagnosis (0 turns it off).
+    const auto* budget =
+        static_cast<const u32*>(m_library.GetSymbolAddress("staticrecomp_dyn_loop_budget"));
+    m_dyn_budget = budget ? static_cast<s64>(*budget) : 0;
+    if (const char* env = std::getenv("RINGOUT_DYN_BUDGET"))
+      m_dyn_budget = std::max<s64>(0, std::strtoll(env, nullptr, 10));
+    if (m_dyn_budget > 0)
+      std::fprintf(stderr, "[staticrecomp] dynamic loop budget: %lld cycles\n",
+                   static_cast<long long>(m_dyn_budget));
   }
   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
   m_failed_chunks = 0;

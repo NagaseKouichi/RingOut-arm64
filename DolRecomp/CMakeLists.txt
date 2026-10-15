@@ -237,6 +237,12 @@ add_executable(test_native_regions tests/test_native_regions.c)
 target_link_libraries(test_native_regions PRIVATE dr_backend dr_platform)
 add_test(NAME native_regions COMMAND test_native_regions)
 
+# The dispatch-reduction flags (--loop-budget, --jump-tables, --indirect-calls, --function-overhang), all off by
+# default: the text each one writes, and the cases each must leave to the dispatcher (hooked PCs, other chunks).
+add_executable(test_dispatch_paths tests/test_dispatch_paths.c)
+target_link_libraries(test_dispatch_paths PRIVATE dr_backend dr_cpu)
+add_test(NAME dispatch_paths COMMAND test_dispatch_paths)
+
 # ...and this pins the scan that supplies the address to it, which is what
 # --idle-pc auto rests on for a disc nobody has hand-inspected.
 add_executable(test_idle_loop tests/test_idle_loop.c)

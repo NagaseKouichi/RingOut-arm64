@@ -152,6 +152,39 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName staging/ }
           Get-ChildItem staging
 
+      - name: Upload binaries for a play test
+        # Build-only dispatches published nothing, so a branch's runtime could not be fetched without
+        # clobbering the shared windows-latest release. 6 MB, kept 2 days -- not the 294 MB bundle
+        # that once filled the shared artifact quota (see "Publish release asset").
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binaries
+          retention-days: 2
+          path: staging/
+
+      - name: Upload PGO training kit (build only)
+        # The same kit as "Publish PGO training kit", as a 2-day artifact, so a branch's profile can be
+        # retrained without a publish (which writes to the shared windows-latest release).
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish && steps.pgo.outputs.mode == 'instrument'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $t = '${{ steps.pgo.outputs.toolset }}'
+          New-Item -ItemType Directory -Force pgo-kit | Out-Null
+          Copy-Item staging/moderngekko-run.exe pgo-kit/
+          Get-ChildItem build -Recurse -Filter moderngekko-run.pgd | Select-Object -First 1 | Copy-Item -Destination pgo-kit/
+          Copy-Item "$vs\VC\Tools\MSVC\$t\bin\Hostx64\x64\pgort140.dll" pgo-kit/
+          Set-Content pgo-kit/toolset.txt $t
+          if (-not (Test-Path pgo-kit/moderngekko-run.pgd)) { throw 'no .pgd produced' }
+          Get-ChildItem pgo-kit
+      - if: github.event_name == 'workflow_dispatch' && !inputs.publish && steps.pgo.outputs.mode == 'instrument'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-pgo-kit
+          retention-days: 2
+          path: pgo-kit/
+
       - name: Publish PGO training kit
         # The instrumented exe, the .pgd its counts belong to, the PGO runtime
         # DLL it loads, and the toolset it was built with. Its own asset name:

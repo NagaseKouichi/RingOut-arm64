@@ -12,7 +12,7 @@
  * checks that make every access EXACTLY the inlined fast path cpu.h would take (nat_skin.h, embedded below).
  * Arithmetic statements are copied verbatim, so rounding cannot drift. A failed guard writes the state back
  * and falls into the original emitted code for that iteration. Cycle charging, the back-edge's
- * DOLRECOMP_DC <= -1000 exit, the CR0 variable and lazy FPRF are reproduced exactly. Any statement the pass
+ * loop-budget exit, the CR0 variable and lazy FPRF are reproduced exactly. Any statement the pass
  * does not recognise leaves that loop untouched, with a warning -- never a guess.
  *
  * Output is byte-identical to work/skin-native/transform.py (the prototype measured above) for the hot copy;
@@ -22,6 +22,7 @@
  * register fields, displacements excluded -- JP and PAL differ only in 8 displacements), so no per-disc
  * address table is needed. */
 #include "backend/native_skin.h"
+#include "backend/emitter.h"
 #include "platform/fs.h"
 
 #include <stdbool.h>
@@ -36,6 +37,8 @@
 
 static bool s_enabled = false;
 void native_skin_enable(bool on) { s_enabled = on; }
+static bool s_simd = false;
+void native_skin_set_simd(bool on) { s_simd = on; }
 
 static const unsigned short kSig[] = {
 #include "native_skin_sig.inc"
@@ -318,10 +321,245 @@ static char* gen_loop(char** v, size_t n, size_t bi, u32 body, u32 test, u32 exi
         str_printf(&o, "            if (--nCTR == 0u) { NAT_WB(); goto label_%08X; }\n", exit);
     else
         str_printf(&o, "            if (!(%s & 0x8u)) { NAT_WB(); goto label_%08X; }\n", cr, exit);
-    str_printf(&o, "            if (DOLRECOMP_DC <= -1000) { NAT_WB(); ctx->pc = 0x%08Xu; DOLRECOMP_RETURN; }\n", body);
+    str_printf(&o, "            if (DOLRECOMP_DC <= -%u) { NAT_WB(); ctx->pc = 0x%08Xu; DOLRECOMP_RETURN; }\n",
+               emit_loop_budget(), body);
     str_printf(&o, "        }\n#undef NAT_WB\n    }\nnat_fall_%08X:", body);
     lines_free(&bs);
     lines_free(&ts);
+    return o.p;
+}
+
+/* --skin-simd: each paired-single register of a native skin loop becomes ONE two-lane vector (nat_v2d) instead of the
+ * nFk/nPk scalar pair, so psq_l/psq_st and ps_mul/ps_madd/ps_add run as packed ops. Every op keeps the scalar code's
+ * per-lane arithmetic exactly (same conversions under the same MXCSR; ps_madd stays two statements so it cannot be
+ * contracted into an FMA; ps_sum0/1 are written per lane). Measured on the Steam Deck (US, both arms PGO-retrained,
+ * n=7): -1.43% cycles, frame hashes identical. A rewrite of the finished block text, byte-identical to the measured
+ * prototype (skinsimd.py); any op it does not know leaves the block scalar. */
+static const char kSimdPrelude[] =
+    "/* ---- --skin-simd: two-lane paired-single vectors (native_skin.c) ---- */\n"
+    "typedef double nat_v2d __attribute__((vector_size(16)));\n"
+    "typedef float nat_v2f __attribute__((vector_size(8)));\n"
+    "typedef u64 nat_v2u __attribute__((vector_size(16)));\n"
+    "typedef s32 nat_v2i __attribute__((vector_size(8)));\n"
+    "NAT_FN nat_v2f nat_vf(nat_v2d a) { return __builtin_convertvector(a, nat_v2f); }\n"
+    "NAT_FN nat_v2d nat_vd(nat_v2f a) { return __builtin_convertvector(a, nat_v2d); }\n"
+    "NAT_FN nat_v2d nat_vround(nat_v2d a) { return nat_vd(nat_vf(a)); }\n"
+    "NAT_FN nat_v2d nat_vforce25(nat_v2d a) {\n"
+    "    nat_v2u b = (nat_v2u)a;\n"
+    "    return (nat_v2d)((b & 0xFFFFFFFFF8000000ull) + (b & 0x0000000008000000ull));\n"
+    "}\n"
+    "NAT_FN nat_v2d nat_v_l0(u8* ram, u32 ea) {\n"
+    "    const u8* h = ram + (ea - GC_RAM_BASE);\n"
+    "    u32 a = read_be32(h), b = read_be32(h + 4);\n"
+    "    f32 fa, fb; memcpy(&fa, &a, 4); memcpy(&fb, &b, 4); nat_v2f f = { fa, fb };\n"
+    "    return nat_vd(f);\n"
+    "}\n"
+    "NAT_FN nat_v2d nat_v_ls16(u8* ram, u32 ea, f64 m) {\n"
+    "    const u8* h = ram + (ea - GC_RAM_BASE);\n"
+    "    nat_v2i i = { (s32)(s16)read_be16(h), (s32)(s16)read_be16(h + 2) };\n"
+    "    return nat_vround(__builtin_convertvector(i, nat_v2d) * m);\n"
+    "}\n"
+    "#define NAT_VPSQ_ST(n, ea_) do { u32 nat_ea = (ea_); u8* h = NAT_RAM + (nat_ea - GC_RAM_BASE); \\\n"
+    "    dolrecomp_clear_reservation(ctx, nat_ea); dolrecomp_journal_cached(ctx, h, 8u); \\\n"
+    "    NAT_PSQ_ST2(h, nV##n[0], nV##n[1]); } while (0)\n"
+    "/* ---- end --skin-simd ---- */\n";
+
+/* `<ind>// XXXXXXXX: <op> <args>` -> indent length, op and args (pointers into l). */
+static bool guest_comment(const char* l, size_t* ind, char* op, size_t opn, const char** args) {
+    const char* p = l;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!starts(p, "// ")) return false;
+    for (int i = 0; i < 8; i++) {
+        char c = p[3 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    if (p[11] != ':' || p[12] != ' ') return false;
+    const char* o = p + 13, *e = o;
+    while (*e && *e != ' ' && *e != '\t') e++;
+    if (e == o || !*e || (size_t)(e - o) >= opn) return false;
+    memcpy(op, o, (size_t)(e - o));
+    op[e - o] = 0;
+    while (*e == ' ' || *e == '\t') e++;
+    *ind = (size_t)(p - l);
+    *args = e;
+    return true;
+}
+
+/* "f3, 8(r5), 0, 0" -> fields; fN -> N, d(rN) -> disp and N */
+static int split_args(const char* a, char f[4][24]) {
+    int n = 0;
+    while (*a && n < 4) {
+        while (*a == ' ') a++;
+        const char* e = strchr(a, ',');
+        size_t k = e ? (size_t)(e - a) : strlen(a);
+        while (k && a[k - 1] == ' ') k--;
+        if (k >= 24) return -1;
+        memcpy(f[n], a, k);
+        f[n][k] = 0;
+        n++;
+        if (!e) break;
+        a = e + 1;
+    }
+    return n;
+}
+static bool fpr_num(const char* s, unsigned* n) {
+    char* e;
+    if (*s != 'f') return false;
+    unsigned long v = strtoul(s + 1, &e, 10);
+    if (e == s + 1 || *e || v >= 32) return false;
+    *n = (unsigned)v;
+    return true;
+}
+static bool disp_reg(const char* s, long* d, unsigned* r) {
+    char* e;
+    *d = strtol(s, &e, 10);
+    if (e == s || *e != '(' || e[1] != 'r') return false;
+    char* e2;
+    unsigned long v = strtoul(e + 2, &e2, 10);
+    if (e2 == e + 2 || *e2 != ')' || e2[1] || v >= 32) return false;
+    *r = (unsigned)v;
+    return true;
+}
+
+static bool simd_op(Str* o, const char* ind, size_t indn, const char* op, const char* args) {
+    char f[4][24];
+    int na = split_args(args, f);
+    unsigned d, x, c, b, r;
+    long disp;
+    if (strcmp(op, "psq_l") == 0) {
+        if (na != 4 || !fpr_num(f[0], &d) || !disp_reg(f[1], &disp, &r)) return false;
+        unsigned long q = strtoul(f[3], NULL, 10);
+        str_add(o, ind, indn);
+        if (q == 0) str_printf(o, "nV%u = nat_v_l0(NAT_RAM, nG%u + (u32)(s32)(%ld));\n", d, r, disp);
+        else str_printf(o, "nV%u = nat_v_ls16(NAT_RAM, nG%u + (u32)(s32)(%ld), nat_qscale(ctx, %lu));\n", d, r, disp, q);
+        return true;
+    }
+    if (strcmp(op, "psq_st") == 0) {
+        if (na != 4 || !fpr_num(f[0], &d) || !disp_reg(f[1], &disp, &r)) return false;
+        str_add(o, ind, indn);
+        str_printf(o, "NAT_VPSQ_ST(%u, nG%u + (u32)(s32)(%ld));\n", d, r, disp);
+        return true;
+    }
+    str_add(o, ind, indn);
+    if (strcmp(op, "ps_mul") == 0) {
+        if (na != 3 || !fpr_num(f[0], &d) || !fpr_num(f[1], &x) || !fpr_num(f[2], &c)) return false;
+        str_printf(o, "nV%u = nat_vround(nV%u * nat_vforce25(nV%u));\n", d, x, c);
+    } else if (strcmp(op, "ps_madd") == 0 || strcmp(op, "ps_sum0") == 0 || strcmp(op, "ps_sum1") == 0) {
+        /* frD, frA, frC, frB */
+        if (na != 4 || !fpr_num(f[0], &d) || !fpr_num(f[1], &x) || !fpr_num(f[2], &c) || !fpr_num(f[3], &b)) return false;
+        if (op[3] == 'm') /* two statements, as the scalar code: one expression could be contracted into an FMA */
+            str_printf(o, "{ nat_v2f p = nat_vf(nV%u) * nat_vf(nV%u); p += nat_vf(nV%u); nV%u = nat_vd(p); }\n", x, c, b, d);
+        else if (op[6] == '0')
+            str_printf(o, "{ nat_v2d t = { (f64)((f32)nV%u[0] + (f32)nV%u[1]), (f64)(f32)nV%u[1] }; nV%u = t; }\n", x, b, c, d);
+        else
+            str_printf(o, "{ nat_v2d t = { (f64)(f32)nV%u[0], (f64)((f32)nV%u[0] + (f32)nV%u[1]) }; nV%u = t; }\n", c, x, b, d);
+    } else if (strcmp(op, "ps_add") == 0) {
+        if (na != 3 || !fpr_num(f[0], &d) || !fpr_num(f[1], &x) || !fpr_num(f[2], &b)) return false;
+        str_printf(o, "nV%u = nat_vd(nat_vf(nV%u) + nat_vf(nV%u));\n", d, x, b);
+    } else {
+        return false;
+    }
+    str_add(o, ind, indn);
+    str_printf(o, "nat_fprf = ((f32)nV%u[0]);\n", d);
+    return true;
+}
+
+static bool has_scalar_fp(const char* t) {
+    for (const char* p = t; (p = strchr(p, 'n')); p++)
+        if ((p[1] == 'F' || p[1] == 'P') && p[2] >= '0' && p[2] <= '9' &&
+            (p == t || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')))
+            return true;
+    return false;
+}
+
+/* The --skin-simd rewrite of one finished loop block. NULL = an op or shape it does not know (block stays scalar). */
+static char* simd_block(const char* code) {
+    Lines L = {0};
+    for (const char *p = code, *q;; p = q + 1) {
+        q = strchr(p, '\n');
+        if (!q) { lines_push(&L, strdup(p)); break; }
+        char* l = malloc((size_t)(q - p) + 1);
+        memcpy(l, p, (size_t)(q - p));
+        l[q - p] = 0;
+        lines_push(&L, l);
+    }
+    Str o = {0};
+    bool ok = true;
+    for (size_t i = 0; i < L.n && ok; i++) {
+        const char* l = L.v[i];
+        if (strstr(l, "f64 nF") && strstr(l, " = ctx->fpr[")) { /* the declarations */
+            Str d = {0};
+            for (const char* p = l; *p;) {
+                unsigned k, k2, k3, k4;
+                int used = 0;
+                if (sscanf(p, "f64 nF%u = ctx->fpr[%u], nP%u = ctx->ps1[%u];%n", &k, &k2, &k3, &k4, &used) == 4 && used &&
+                    k == k2 && k == k3 && k == k4) {
+                    str_printf(&d, "nat_v2d nV%u = { ctx->fpr[%u], ctx->ps1[%u] };", k, k, k);
+                    p += used;
+                } else {
+                    str_add(&d, p, 1);
+                    p++;
+                }
+            }
+            str_puts(&o, d.p);
+            free(d.p);
+            str_puts(&o, "\n");
+            continue;
+        }
+        if (starts(skip_ws(l), "#define NAT_WB()")) {
+            Str d = {0};
+            for (const char* p = l; *p;) {
+                unsigned k, k2, k3, k4;
+                int used = 0;
+                if (sscanf(p, "ctx->fpr[%u] = nF%u; ctx->ps1[%u] = nP%u;%n", &k, &k2, &k3, &k4, &used) == 4 && used &&
+                    k == k2 && k == k3 && k == k4) {
+                    str_printf(&d, "ctx->fpr[%u] = nV%u[0]; ctx->ps1[%u] = nV%u[1];", k, k, k, k);
+                    p += used;
+                } else {
+                    str_add(&d, p, 1);
+                    p++;
+                }
+            }
+            str_puts(&o, d.p);
+            free(d.p);
+            str_puts(&o, "\n");
+            continue;
+        }
+        size_t ind;
+        char op[16];
+        const char* args;
+        if (guest_comment(l, &ind, op, sizeof(op), &args) &&
+            (strcmp(op, "psq_l") == 0 || strcmp(op, "psq_st") == 0 || strcmp(op, "ps_mul") == 0 || strcmp(op, "ps_madd") == 0 ||
+             strcmp(op, "ps_add") == 0 || strcmp(op, "ps_sum0") == 0 || strcmp(op, "ps_sum1") == 0)) {
+            /* the op's statements run to the next guest comment / cycle charge / nat_any / guard / register
+             * statement at the comment's indent, or the loop's closing brace */
+            size_t j = i + 1;
+            for (; j < L.n; j++) {
+                const char* t = L.v[j];
+                size_t ti;
+                char top[16];
+                const char* ta;
+                if (guest_comment(t, &ti, top, sizeof(top), &ta)) break;
+                if (strncmp(t, l, ind) == 0) {
+                    const char* r = t + ind;
+                    if (starts(r, "DOLRECOMP_DC") || starts(r, "nat_any") || starts(r, "if (") || starts(r, "nG")) break;
+                }
+                if (ind >= 4 && strlen(t) == ind - 4 + 1 && strncmp(t, l, ind - 4) == 0 && t[ind - 4] == '}') break;
+            }
+            str_add(&o, l, ind);
+            str_puts(&o, "// ");
+            str_add(&o, l + ind + 3, 8);
+            str_printf(&o, ": %s  %s  (skin-simd)\n", op, args);
+            if (!simd_op(&o, l, ind, op, args)) { ok = false; break; }
+            i = j - 1;
+            continue;
+        }
+        str_puts(&o, l);
+        if (i + 1 < L.n) str_puts(&o, "\n");
+    }
+    lines_free(&L);
+    if (ok && has_scalar_fp(o.p)) ok = false; /* nothing may still use the scalar FP locals */
+    if (!ok) { free(o.p); return NULL; }
     return o.p;
 }
 
@@ -371,6 +609,12 @@ static bool patch_file(const char* path, u32 fn, unsigned* patched) {
                 from = at + 1;
                 continue;
             }
+            if (s_simd) {
+                char* v = simd_block(code);
+                if (v) { free(code); code = v; }
+                else fprintf(stderr, "native-skin: loop L%d at %08X in %s: --skin-simd does not know an op; left scalar\n",
+                             lp + 1, fn + kLoops[lp].body, path);
+            }
             lines_push(&L, NULL); /* grow by one, then shift */
             memmove(&L.v[at + 2], &L.v[at + 1], (L.n - at - 2) * sizeof(char*));
             L.v[at + 1] = code;
@@ -388,7 +632,13 @@ static bool patch_file(const char* path, u32 fn, unsigned* patched) {
         fputs(L.v[i], w);
         if (!header_done && strcmp(L.v[i], "#include \"../generated.h\"") == 0) {
             fputs("\n", w);
-            fputs(kHeader, w);
+            if (s_simd) { /* the vector helpers go right before nat_mtx_ok: they use NAT_FN, NAT_RAM and NAT_PSQ_ST2 */
+                const char* at = strstr(kHeader, "NAT_FN bool nat_mtx_ok");
+                fwrite(kHeader, 1, (size_t)(at - kHeader), w);
+                fputs(kSimdPrelude, w);
+                fputs(at, w);
+            } else
+                fputs(kHeader, w);
             header_done = true;
             continue; /* kHeader ends in a newline: the next line follows directly */
         }

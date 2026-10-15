@@ -478,6 +478,32 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--native-skin);; 
 if [ -f "$HERE/module-src/profiles/$DISC_ID.regions" ]; then
     LEADER_CASES+=(--native-regions "$HERE/module-src/profiles/$DISC_ID.regions")
 fi
+# Fewer returns to the dispatcher (all four discs): --function-overhang keeps a
+# call inside one chunk when the function runs past the chunk's window (the
+# RNG function, called ~2000 times a frame, left its chunk on every call);
+# --loop-budget lets a loop run 4000 cycles natively instead of 1000 before it
+# hands control back; --jump-tables turns a switch's jump table into a local
+# switch; --indirect-calls calls a function pointer's target natively.
+# Dispatches over the arcade route 187.5 M -> 40.7 M. Steam Deck, both arms
+# retrained, cycles: -7.61%. It changes guest timing, like --direct-calls.
+# --dynamic-loop-budget: the module tells the runtime its budget, and a loop then
+# runs on to the next timing event when that is further away than 4000 cycles.
+# Chunk code is unchanged (no retrain). Steam Deck, same work, against main with
+# its own runtime profile: -0.37% cycles (US).
+# JP, Plus and PAL take the same set (2026-10-12): arcade-route dispatches 203 M -> 31 M (JP),
+# 185 M -> 31 M (Plus), 214 M -> 31 M (PAL); each disc has its own retrained profiles and hot list.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--function-overhang 4096 --loop-budget 4000 --dynamic-loop-budget --jump-tables --indirect-calls);; esac
+# All four discs (US 2026-10-13, JP/Plus/PAL 2026-10-14); US measured on the Steam Deck with both arms
+# retrained and frame hashes identical:
+# --inline-leaves 32: small loop-free leaf functions (at most 32 instructions)
+# are copied into their native call sites, so the call and its chunk entry and
+# exit go away: -1.20% cycles (sizes 16 to 64 measure alike; 128 loses).
+# --skin-simd: the skinning loops hold each paired-single register as one
+# two-lane vector instead of two scalars: -1.43% on top.
+# --region-psq: paired-single loads and stores in the native regions move
+# straight between guest RAM and the region's locals instead of through the CPU
+# state, whenever the recompiled code's own fast path would apply: -1.51% on top.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--inline-leaves 32 --skin-simd --region-psq);; esac
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every
@@ -759,7 +785,7 @@ if [ "$PGO" = 1 ]; then
                 echo "    adding them to a local list and training again ..."
                 { cat "$HERE/module-src/profiles/$DISC_ID.hot"; awk '$2 >= 1000' "$MISS_FILE"; } |
                     sort -u -k1,1 > "$HERE/work/local.hot"
-                TWIN=(--twin-hot "$HERE/work/local.hot" --twin-regs ratio)
+                TWIN=(--twin-hot "$HERE/work/local.hot" --twin-regs ratio --twin-cr)
                 if ! { "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
                          "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out" \
                          >"$HERE/work/pgo-regen.log" 2>&1 \

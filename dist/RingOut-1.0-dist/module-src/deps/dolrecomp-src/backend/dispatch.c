@@ -369,8 +369,12 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     fprintf(out, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     /* Guest-timing class, exported by the module as staticrecomp_timing_id for
        replay compatibility. Only written under --direct-calls, so a default
-       generation stays byte-identical; the module template defaults to 1. */
-    if (emit_direct_calls_enabled() && (emit_self_calls_enabled() || emit_tail_calls_enabled()))
+       generation stays byte-identical; the module template defaults to 1.
+       --dynamic-loop-budget changes when loops hand control back, so it is its own class (4) and also
+       exports the budget, which is what turns the runtime side on. */
+    if (emit_dynamic_loop_budget_enabled())
+        fprintf(out, "#define DOLRECOMP_TIMING_ID 4u\n#define DOLRECOMP_DYN_LOOP_BUDGET %uu\n", emit_loop_budget());
+    else if (emit_direct_calls_enabled() && (emit_self_calls_enabled() || emit_tail_calls_enabled()))
         fprintf(out, "#define DOLRECOMP_TIMING_ID 3u\n");
     else if (emit_direct_calls_enabled())
         fprintf(out, "#define DOLRECOMP_TIMING_ID 2u\n");

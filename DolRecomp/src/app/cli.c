@@ -20,10 +20,23 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --leader-cases                 Reduced entry switch: leaders + FP-guard sites + program-wide\n");
     fprintf(stderr, "                                 branch/data targets (hash-clean, -8%% cycles; DOL input)\n");
     fprintf(stderr, "  --chunk-overhang <max>         Let each chunk run on past its window, up to <max>\n");
-    fprintf(stderr, "  --native-skin                  Native fast paths for SoulCalibur II's CPU skinning loops\n");
-    fprintf(stderr, "  --native-regions <file>        Run the hot guest regions listed in <file> as native C\n");
     fprintf(stderr, "                                 instructions, to the first unconditional exit, so\n");
     fprintf(stderr, "                                 code straddling a boundary stays in one chunk\n");
+    fprintf(stderr, "  --function-overhang <max>      An overhang runs on to the next function start (bl\n");
+    fprintf(stderr, "                                 target) when that is within <max> instructions, so a\n");
+    fprintf(stderr, "                                 function straddling the window returns inside one chunk\n");
+    fprintf(stderr, "  --loop-budget <cycles>         Native cycles a loop may run before handing control back\n");
+    fprintf(stderr, "                                 (default 1000)\n");
+    fprintf(stderr, "  --dynamic-loop-budget          Export the loop budget so the runtime lets a loop run\n");
+    fprintf(stderr, "                                 on to the next timing event when that is further away\n");
+    fprintf(stderr, "  --jump-tables                  bctr over a CodeWarrior jump table: a local switch over\n");
+    fprintf(stderr, "                                 the table's targets, the dispatcher only for the rest\n");
+    fprintf(stderr, "  --indirect-calls               With --direct-calls: bctrl calls its target natively\n");
+    fprintf(stderr, "  --native-skin                  Native fast paths for SoulCalibur II's CPU skinning loops\n");
+    fprintf(stderr, "  --native-regions <file>        Run the hot guest regions listed in <file> as native C\n");
+    fprintf(stderr, "  --inline-leaves <N>            Inline leaf callees of at most N instructions at native call sites\n");
+    fprintf(stderr, "  --skin-simd                    With --native-skin: paired singles as two-lane vectors in the skin loops\n");
+    fprintf(stderr, "  --region-psq                   Float psq_l/psq_st in native regions skip the CPU-state round trip\n");
     fprintf(stderr, "  --ram-bases <list>             D-form loads/stores based on these registers (e.g.\n");
     fprintf(stderr, "                                 1,2,13) skip the range test: they only reach RAM\n");
     fprintf(stderr, "  --preserve-none                Chunk functions use clang's preserve_none convention\n");
@@ -216,6 +229,46 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 return 0;
             }
             opts->native_regions = argv[++i];
+            continue;
+        }
+        if (strcmp(arg, "--skin-simd") == 0) {
+            opts->skin_simd = 1;
+            continue;
+        }
+        if (strcmp(arg, "--region-psq") == 0) {
+            opts->region_psq = 1;
+            continue;
+        }
+        if (strcmp(arg, "--inline-leaves") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            opts->inline_leaves = (unsigned)strtoul(argv[++i], NULL, 10);
+            continue;
+        }
+        if (strcmp(arg, "--function-overhang") == 0 || strcmp(arg, "--loop-budget") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s needs an argument\n", arg);
+                return 0;
+            }
+            unsigned v = (unsigned)strtoul(argv[++i], NULL, 10);
+            if (arg[2] == 'f')
+                opts->function_overhang = v;
+            else
+                opts->loop_budget = v;
+            continue;
+        }
+        if (strcmp(arg, "--dynamic-loop-budget") == 0) {
+            opts->dynamic_loop_budget = 1;
+            continue;
+        }
+        if (strcmp(arg, "--jump-tables") == 0) {
+            opts->jump_tables = 1;
+            continue;
+        }
+        if (strcmp(arg, "--indirect-calls") == 0) {
+            opts->indirect_calls = 1;
             continue;
         }
         if (strcmp(arg, "--chunk-overhang") == 0) {

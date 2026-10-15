@@ -224,6 +224,19 @@ private:
   // Carried CPU-cycle remainder for advancing the guest Time Base at the
   // hardware rate (CPU clock / TIMER_RATIO). Reset each SyncIn.
   u64 m_tb_cycle_remainder = 0;
+  // Dynamic loop budget: when the module exports its loop budget (staticrecomp_dyn_loop_budget,
+  // DolRecomp --dynamic-loop-budget), each dispatch's charge accumulator starts at
+  // max(0, cycles to the next CoreTiming event - budget), so a native loop's
+  // `downcount <= -budget` exit fires at max(budget, cycles to the event) rather than always at
+  // the budget. 0 (an older module, or RINGOUT_DYN_BUDGET=0) keeps the accumulator at 0, the old
+  // behaviour. m_dc_bias is the start value, so the cycles charged are m_dc_bias - downcount.
+  s64 m_dc_bias = 0;
+  s64 m_dyn_budget = 0;
+  void ArmCharge(int ppc_downcount)
+  {
+    m_dc_bias = (m_dyn_budget > 0 && ppc_downcount > m_dyn_budget) ? ppc_downcount - m_dyn_budget : 0;
+    m_guest.downcount = m_dc_bias;
+  }
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;

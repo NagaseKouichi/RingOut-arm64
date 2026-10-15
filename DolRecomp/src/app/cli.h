@@ -28,6 +28,11 @@ typedef struct {
     int chain_calls;
     int leader_cases;
     unsigned chunk_overhang; // --chunk-overhang <max>: emit past the window to the first exit
+    unsigned function_overhang; // --function-overhang <max>: an overhang runs to the next function start
+    unsigned loop_budget;    // --loop-budget <cycles>: native cycles before a back-edge returns (0 = 1000)
+    int dynamic_loop_budget; // --dynamic-loop-budget: the module exports its budget; loops run to the next event
+    int jump_tables;         // --jump-tables: bctr over a recovered jump table becomes a local switch
+    int indirect_calls;      // --indirect-calls: bctrl calls its target natively (needs --direct-calls)
     const char* ram_bases;   // --ram-bases <list>: base registers that only address RAM
     int preserve_none;       // --preserve-none: chunk functions save no callee-saved registers
     int fp_check_once;       // --fp-check-once: one MSR.FP test per straight-line run
@@ -40,6 +45,9 @@ typedef struct {
     int exit_stats;     // --exit-stats (diagnostic: count dispatches by cause)
     int native_skin;    // --native-skin: native fast paths for SC2's CPU skinning loops
     const char* native_regions; // --native-regions <file>: hot guest regions run as native C
+    int skin_simd;              // --skin-simd: two-lane vectors in the native skin loops
+    int region_psq;             // --region-psq: direct float psq_l/psq_st inside native regions
+    unsigned inline_leaves;     // --inline-leaves <N>: inline leaf callees of at most N instructions (0 = off)
     int ca_liveness;
     int ca_elide;       // --ca-elide (changes codegen; off by default)
     int cpu_explicit;

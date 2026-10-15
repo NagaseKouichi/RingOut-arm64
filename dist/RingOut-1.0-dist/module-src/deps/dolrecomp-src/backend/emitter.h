@@ -50,6 +50,23 @@ void emit_set_chain_calls(bool enable);
    actually arrive. See emitter.c for the entry rule and its evidence. */
 void emit_set_leader_cases(bool enable);
 void emit_set_chunk_overhang(u32 max_insts);
+/* --function-overhang: carry an overhang to the next function start (see emitter.c). */
+void emit_set_function_overhang(u32 max_insts);
+/* Function starts (sorted, unique) for --function-overhang; MAIN THREAD, before the chunk jobs run. */
+void emit_set_function_starts(const u32* starts, u32 count);
+/* --loop-budget: 0 keeps the default 1000. emit_loop_budget() is what the native passes must print too. */
+void emit_set_loop_budget(u32 cycles);
+u32 emit_loop_budget(void);
+/* --dynamic-loop-budget: the generated header defines DOLRECOMP_DYN_LOOP_BUDGET, which the module template
+   exports as staticrecomp_dyn_loop_budget; the chassis then starts each dispatch's charge so a loop exit
+   fires at max(budget, cycles to the next CoreTiming event). Chunk code is unchanged. */
+void emit_set_dynamic_loop_budget(int enabled);
+int emit_dynamic_loop_budget_enabled(void);
+/* --jump-tables, and the DOL data the tables are read from (copied). */
+void emit_set_jump_tables(bool enable);
+void emit_add_data_section(u32 addr, u32 size, const u8* bytes);
+/* --indirect-calls (needs --direct-calls). */
+void emit_set_indirect_calls(bool enable);
 /* bit i: D-form accesses based on guest ri can only reach main RAM. */
 void emit_set_ram_bases(u32 mask);
 void emit_set_preserve_none(bool enable);
